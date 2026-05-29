@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+/* ── CSS Custom Properties ── */
+:root {
+  --radius: 0.75rem;
+}
+
+/* ── Basis-Reset ── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background-color: #f8fafc;   /* slate-50 */
+  color: #0f172a;               /* slate-900 */
+  font-family: 'Geist', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
