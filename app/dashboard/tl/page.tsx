@@ -14,7 +14,7 @@ export default async function TlDashboard() {
   // Alle Projekte laden (TL sieht alle)
   const { data: projects } = await supabase
     .from('projects')
-    .select('id, project_number, name')
+    .select('id, project_number, name, calc_profile')
     .order('project_number')
 
   // Mitarbeiter laden (TL darf employees_public nutzen)

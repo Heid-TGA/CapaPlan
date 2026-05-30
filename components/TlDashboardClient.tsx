@@ -10,6 +10,7 @@ interface Project {
   id: string
   project_number: string
   name: string
+  calc_profile?: string
 }
 
 interface Employee {

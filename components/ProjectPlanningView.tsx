@@ -1,14 +1,17 @@
 'use client'
 
 import { useState, useTransition, useEffect, useRef } from 'react'
-import { TrendingDown, Users, Clock, Euro, Circle, ChevronRight, Plus, X } from 'lucide-react'
+import { TrendingDown, Users, Clock, Euro, Circle, ChevronRight, Plus, X, Calculator } from 'lucide-react'
 import { upsertAllocation, getLphBudgetStatus } from '@/app/actions/allocation'
 import { loadProjectAllocations } from '@/app/actions/heatmap'
 import { loadTerminplan, saveLphSchedule, saveMilestone, ensureLphBudgetRow, type LphSchedule, type Milestone } from '@/app/actions/terminplan'
 import { loadExternalTrades, createExternalTrade, deleteExternalTrade, type ExternalTrade } from '@/app/actions/external-trades'
+import { updateProjectCalcProfile } from '@/app/actions/project-settings'
 import { ALL_LPH, LPH_LABELS } from '@/lib/planning-phases'
+import { CALC_PROFILES, CALC_PROFILE_LABELS, isCalcProfile, type CalcProfile } from '@/lib/calc-profile'
 import { isoWeekOf, mondayOfIsoWeek } from '@/lib/calendar-weeks'
 import GanttBar from './GanttBar'
+import HoaiCalculatorModal from './HoaiCalculatorModal'
 
 // ── Konstanten ─────────────────────────────────────────────────────────────────
 
@@ -29,7 +32,7 @@ function lphColor(n: number): string {
 
 // ── Typen ──────────────────────────────────────────────────────────────────────
 
-interface Project { id: string; project_number: string; name: string }
+interface Project { id: string; project_number: string; name: string; calc_profile?: string }
 interface Employee { id: string; name: string; role_type: string; department: string; weekly_capacity_hours: number }
 interface Allocation { hours: number; source: 'H&I' | 'Manuell_PL' }
 type AllocMap = Record<string, Record<number, Allocation>>
@@ -93,6 +96,17 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const [etSaving, setEtSaving] = useState(false)
   const [etError, setEtError] = useState<string | null>(null)
   const [deletingEtId, setDeletingEtId] = useState<string | null>(null)
+
+  // Kalkulationsprofil (A1) — nur ein Schalter; aendert keine Budgets/Allocations/
+  // Meilensteine/Gewerke. Lokaler Override-State je Projekt-ID (Prop bleibt unberuehrt).
+  const [profileByProject, setProfileByProject] = useState<Record<string, CalcProfile>>(
+    () => Object.fromEntries(projects.map(p => [p.id, isCalcProfile(p.calc_profile) ? p.calc_profile : 'frei']))
+  )
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [profileError, setProfileError] = useState<string | null>(null)
+
+  // HOAI-Dummy-Rechner (A2) — rein lokales Szenario-Fenster, keine Persistenz.
+  const [showHoai, setShowHoai] = useState(false)
 
   const currentWeek = getCurrentWeek()
   const currentYear = new Date().getFullYear()
@@ -165,7 +179,38 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     setVisibleLph(new Set()); setSelectedLph(null); setShowLphPicker(false)
     setExternalTrades([]); setShowEtForm(false); setEtError(null)
     setScheduleError(null)
+    setProfileError(null)
     await loadAll(project)
+  }
+
+  // ── Kalkulationsprofil (A1) ────────────────────────────────────────────────
+  // Aktuelles Profil des gewaehlten Projekts (lokaler Override, sonst 'frei').
+  const currentProfile: CalcProfile =
+    selectedProject ? (profileByProject[selectedProject.id] ?? 'frei') : 'frei'
+
+  async function handleProfileChange(value: string) {
+    if (!selectedProject || !isCalcProfile(value)) return
+    const projectId = selectedProject.id
+    const prev = profileByProject[projectId] ?? 'frei'
+    if (value === prev) return
+    // Optimistisch setzen, bei Fehler zuruecksetzen.
+    setProfileByProject(m => ({ ...m, [projectId]: value }))
+    setProfileSaving(true); setProfileError(null)
+    try {
+      const res = await updateProjectCalcProfile(projectId, value)
+      if (!res.success) {
+        setProfileByProject(m => ({ ...m, [projectId]: prev }))
+        setProfileError(res.message)
+        console.error('updateProjectCalcProfile:', res.message)
+      }
+    } catch (e) {
+      setProfileByProject(m => ({ ...m, [projectId]: prev }))
+      const msg = e instanceof Error ? e.message : 'Speichern fehlgeschlagen'
+      setProfileError(msg)
+      console.error('updateProjectCalcProfile:', e)
+    } finally {
+      setProfileSaving(false)
+    }
   }
 
   // ── Abgeleitete Werte ────────────────────────────────────────────────────────
@@ -436,15 +481,43 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   return (
     <div className="space-y-4">
 
-      {/* ── Projekt-Auswahl ── */}
-      <div className="flex items-center gap-2 flex-wrap">
-        {projects.map(p => (
-          <button key={p.id} onClick={() => handleProjectSelect(p)}
-            className={`px-4 py-2 rounded-lg text-sm font-medium border transition-all ${selectedProject?.id === p.id ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300 hover:bg-slate-50'}`}>
-            <span className="text-xs opacity-60 mr-1.5">{p.project_number}</span>{p.name}
-          </button>
-        ))}
+      {/* ── Projekt-Auswahl + Kalkulationsprofil ── */}
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          {projects.map(p => (
+            <button key={p.id} onClick={() => handleProjectSelect(p)}
+              className={`px-4 py-2 rounded-lg text-sm font-medium border transition-all ${selectedProject?.id === p.id ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300 hover:bg-slate-50'}`}>
+              <span className="text-xs opacity-60 mr-1.5">{p.project_number}</span>{p.name}
+            </button>
+          ))}
+        </div>
+
+        {selectedProject && (
+          <div className="flex items-center gap-2 shrink-0">
+            <label htmlFor="calc-profile" className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Kalkulationsprofil</label>
+            <select id="calc-profile" value={currentProfile} disabled={profileSaving}
+              onChange={e => handleProfileChange(e.target.value)}
+              className="text-sm border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-700 outline-none focus:border-slate-400 disabled:opacity-50">
+              {CALC_PROFILES.map(p => (
+                <option key={p} value={p}>{CALC_PROFILE_LABELS[p]}</option>
+              ))}
+            </select>
+            {profileSaving && <span className="text-[10px] text-amber-500 animate-pulse">Speichern…</span>}
+            {profileError && <span className="text-[10px] text-red-500" title={profileError}>Profil nicht gespeichert</span>}
+            {currentProfile === 'TGA' && (
+              <button onClick={() => setShowHoai(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 text-xs font-medium hover:bg-slate-50 transition-colors">
+                <Calculator className="h-3.5 w-3.5" />HOAI-Rechner
+              </button>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* HOAI-Dummy-Rechner (A2): isoliertes, rein lokales Szenario-Fenster. */}
+      {showHoai && selectedProject && (
+        <HoaiCalculatorModal projectId={selectedProject.id} projectName={selectedProject.name} onClose={() => setShowHoai(false)} />
+      )}
 
       {/* ── Budget-Karten (aktive LPH) ── */}
       <div className="grid grid-cols-3 gap-4">

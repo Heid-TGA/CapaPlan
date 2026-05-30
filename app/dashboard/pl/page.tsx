@@ -16,7 +16,7 @@ export default async function PlDashboard() {
   // Projekte dieses PL laden
   const { data: projects } = await supabase
     .from('projects')
-    .select('id, project_number, name')
+    .select('id, project_number, name, calc_profile')
     .eq('pl_id', user!.id)
     .order('project_number')
 
