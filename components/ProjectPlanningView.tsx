@@ -67,6 +67,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const [editCell, setEditCell] = useState<{ empId: string; kw: number } | null>(null)
   const [showDummies, setShowDummies] = useState(true)
   const [isPending, startTransition] = useTransition()
+  const [scheduleError, setScheduleError] = useState<string | null>(null) // Terminplan-Speicherfehler (sichtbar)
   const [schedules, setSchedules] = useState<LphSchedule[]>([])
   const [milestones, setMilestones] = useState<Milestone[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -163,6 +164,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     setLphBudgets({}); setAllocations({}); setSchedules([]); setMilestones([])
     setVisibleLph(new Set()); setSelectedLph(null); setShowLphPicker(false)
     setExternalTrades([]); setShowEtForm(false); setEtError(null)
+    setScheduleError(null)
     await loadAll(project)
   }
 
@@ -278,6 +280,28 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     } finally {
       setMsSaving(false)
     }
+  }
+
+  // ── LPH-Terminbalken speichern ─────────────────────────────────────────────────
+  // Persistiert start_kw/end_kw/plan_year über saveLphSchedule und macht Fehler
+  // sichtbar (kein stilles Verwerfen des Ergebnisses mehr). Wird von GanttBar bei
+  // Drag-/Resize-Ende sowie beim Anlegen via Klick auf eine leere Zone aufgerufen.
+  function persistSchedule(id: string, startKw: number, endKw: number) {
+    startTransition(async () => {
+      try {
+        const res = await saveLphSchedule(id, startKw, endKw, currentYear)
+        if (!res.success) {
+          setScheduleError(res.message || 'Terminplan konnte nicht gespeichert werden')
+          console.error('saveLphSchedule fehlgeschlagen:', res.message)
+        } else {
+          setScheduleError(null)
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Terminplan konnte nicht gespeichert werden'
+        setScheduleError(msg)
+        console.error('saveLphSchedule fehlgeschlagen:', e)
+      }
+    })
   }
 
   // ── Andere Gewerke (Terminplan-/Koordinationslayer) ────────────────────────────
@@ -545,6 +569,11 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
           <div className="flex items-center gap-3 text-xs text-slate-400">
             {isPending && <span className="text-amber-500 animate-pulse">Speichern…</span>}
+            {scheduleError && (
+              <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-red-50 text-red-600 text-[10px] font-medium" title={scheduleError}>
+                <X className="h-3 w-3" strokeWidth={3} />Terminplan nicht gespeichert
+              </span>
+            )}
             <span className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-blue-50 text-blue-600 text-[10px] font-medium">H&I-Zone (KW 1–{H_I_WEEKS})</span>
             <span className="flex items-center gap-1"><X className="h-3 w-3 text-red-600" strokeWidth={3} />Extern</span>
             <span className="flex items-center gap-1"><Circle className="h-3 w-3 text-blue-500 fill-blue-500" />Intern</span>
@@ -594,7 +623,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                         ))
                         setSelectedLph(s.lph_number)
                       }}
-                      onSave={(id, start, end) => saveLphSchedule(id, start, end, currentYear)}
+                      onSave={(id, start, end) => persistSchedule(id, start, end)}
                     />
                     {/* Meilenstein-Marker dieser LPH-Zeile: rotes X an der jeweiligen KW,
                         unabhängig vom Terminbalken (auch ohne Balken sichtbar). */}

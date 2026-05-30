@@ -102,23 +102,27 @@ export default function GanttBar({
     dragStartX.current = e.clientX
     dragStartKw.current = { start: startKw, end: endKw }
     const dur = endKw - startKw
-    const capStart = startKw; const capEnd = endKw
+    let last = { start: startKw, end: endKw }
 
     function onMove(ev: PointerEvent) {
       const d = snapDelta(dragStartX.current, ev.clientX)
       if (d !== 0) didDrag.current = true
       const si = Math.max(0, Math.min(weeks.length-1-dur, kwToIdx(dragStartKw.current.start)+d))
-      onChange(lphId, idxToKw(si), idxToKw(si+dur))
+      last = { start: idxToKw(si), end: idxToKw(si+dur) }
+      onChange(lphId, last.start, last.end)
     }
     function onUp() {
       setDragging(false)
-      if (!didDrag.current) setShowPopover(true)
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
+      // Klick ohne Bewegung → Popover. Echtes Drag → Endposition persistieren
+      // (bisher wurde nur lokaler State via onChange geändert, nie gespeichert).
+      if (!didDrag.current) { setShowPopover(true); return }
+      onSave(lphId, last.start, last.end)
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
-  }, [startKw, endKw, weeks, colWidth, lphId, onChange])
+  }, [startKw, endKw, weeks, colWidth, lphId, onChange, onSave])
 
   // ── Resize Left ───────────────────────────────────────────────────────────
 
@@ -129,21 +133,26 @@ export default function GanttBar({
     dragStartX.current = e.clientX
     dragStartKw.current = { start: startKw, end: endKw }
     const capEnd = endKw
+    let last = { start: startKw, end: endKw }
+    let moved = false
 
     function onMove(ev: PointerEvent) {
       const d = snapDelta(dragStartX.current, ev.clientX)
       const ei = kwToIdx(dragStartKw.current.end)
       const si = Math.max(0, Math.min(ei-1, kwToIdx(dragStartKw.current.start)+d))
-      onChange(lphId, idxToKw(si), capEnd)
+      last = { start: idxToKw(si), end: capEnd }
+      if (last.start !== dragStartKw.current.start) moved = true
+      onChange(lphId, last.start, last.end)
     }
     function onUp() {
       setResizingLeft(false)
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
+      if (moved) onSave(lphId, last.start, last.end)
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
-  }, [startKw, endKw, weeks, colWidth, lphId, onChange])
+  }, [startKw, endKw, weeks, colWidth, lphId, onChange, onSave])
 
   // ── Resize Right ──────────────────────────────────────────────────────────
 
@@ -154,21 +163,26 @@ export default function GanttBar({
     dragStartX.current = e.clientX
     dragStartKw.current = { start: startKw, end: endKw }
     const capStart = startKw
+    let last = { start: startKw, end: endKw }
+    let moved = false
 
     function onMove(ev: PointerEvent) {
       const d = snapDelta(dragStartX.current, ev.clientX)
       const si = kwToIdx(dragStartKw.current.start)
       const ei = Math.max(si+1, Math.min(weeks.length-1, kwToIdx(dragStartKw.current.end)+d))
-      onChange(lphId, capStart, idxToKw(ei))
+      last = { start: capStart, end: idxToKw(ei) }
+      if (last.end !== dragStartKw.current.end) moved = true
+      onChange(lphId, last.start, last.end)
     }
     function onUp() {
       setResizingRight(false)
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
+      if (moved) onSave(lphId, last.start, last.end)
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
-  }, [startKw, endKw, weeks, colWidth, lphId, onChange])
+  }, [startKw, endKw, weeks, colWidth, lphId, onChange, onSave])
 
   // ── Leere Zone ────────────────────────────────────────────────────────────
 
@@ -216,7 +230,7 @@ export default function GanttBar({
           onMouseLeave={() => setHovered(false)}
         >
           {/* Resize L */}
-          <div onPointerDown={onResizeRightDown}
+          <div onPointerDown={onResizeLeftDown}
             className={`absolute left-0 top-0 bottom-0 w-4 flex items-center justify-start pl-1
               rounded-l-full cursor-ew-resize transition-opacity ${hovered||resizingLeft?'opacity-100':'opacity-0'}`}>
             <GripVertical className="h-2.5 w-2 text-white/60" />
