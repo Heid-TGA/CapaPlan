@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient } from '@/lib/supabase/server'
+import { buildWeekWindow } from '@/lib/calendar-weeks'
 
 // ── Portfolio-Daten (read-only) ──────────────────────────────────────────────
 // Stufe 1: liefert die Rohdaten für die TL-Portfolio-Übersicht (Projekte ×
@@ -56,48 +57,6 @@ export interface PortfolioData {
   allocations: PortfolioAllocation[]
 }
 
-// ── ISO-Wochen-Helfer (jahreswechsel-sicher) ─────────────────────────────────
-// Bewusst datumsbasiert statt (kw-1+i)%52+1 — behandelt KW 52/53 und den
-// Jahreswechsel korrekt. Alles in UTC, um Zeitzonen-Drift zu vermeiden.
-
-function mondayOfIsoWeek(year: number, week: number): Date {
-  // Jan 4 liegt per ISO 8601 immer in KW 1.
-  const jan4 = new Date(Date.UTC(year, 0, 4))
-  const jan4Dow = (jan4.getUTCDay() + 6) % 7 // 0 = Montag
-  const mondayWeek1 = new Date(jan4)
-  mondayWeek1.setUTCDate(jan4.getUTCDate() - jan4Dow)
-  const monday = new Date(mondayWeek1)
-  monday.setUTCDate(mondayWeek1.getUTCDate() + (week - 1) * 7)
-  return monday
-}
-
-function isoWeekOf(date: Date): { year: number; week: number } {
-  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
-  const dow = (d.getUTCDay() + 6) % 7 // 0 = Montag
-  // Donnerstag dieser Woche bestimmt das ISO-Jahr.
-  d.setUTCDate(d.getUTCDate() - dow + 3)
-  const isoYear = d.getUTCFullYear()
-  const firstThursday = new Date(Date.UTC(isoYear, 0, 4))
-  const ftDow = (firstThursday.getUTCDay() + 6) % 7
-  firstThursday.setUTCDate(firstThursday.getUTCDate() - ftDow + 3)
-  const week = 1 + Math.round((d.getTime() - firstThursday.getTime()) / (7 * 86_400_000))
-  return { year: isoYear, week }
-}
-
-// Fortlaufendes Fenster aus `horizon` ISO-Wochen ab (refYear, refWeek).
-function buildWeekWindow(refYear: number, refWeek: number, horizon: number): PortfolioWeek[] {
-  const today = isoWeekOf(new Date())
-  const startMonday = mondayOfIsoWeek(refYear, refWeek)
-  const weeks: PortfolioWeek[] = []
-  for (let i = 0; i < horizon; i++) {
-    const d = new Date(startMonday)
-    d.setUTCDate(startMonday.getUTCDate() + i * 7)
-    const { year, week } = isoWeekOf(d)
-    weeks.push({ year, week, isCurrent: year === today.year && week === today.week })
-  }
-  return weeks
-}
-
 // ── Embedding-Helfer (analog heatmap.ts) ─────────────────────────────────────
 
 type LphRow = { lph_number: number } | { lph_number: number }[] | null
@@ -117,7 +76,7 @@ export async function loadPortfolioData(
 ): Promise<PortfolioData> {
   const supabase = await createClient()
 
-  const weeks = buildWeekWindow(refYear, refWeek, horizon)
+  const weeks = buildWeekWindow({ year: refYear, week: refWeek }, horizon)
   const years = [...new Set(weeks.map((w) => w.year))]
   const weekNumbers = [...new Set(weeks.map((w) => w.week))]
   const windowKeys = new Set(weeks.map((w) => `${w.year}-${w.week}`))

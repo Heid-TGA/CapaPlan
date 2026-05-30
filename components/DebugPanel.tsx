@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { Bug, X, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react'
 import { loadHeatmapData } from '@/app/actions/heatmap'
+import { currentIsoWeek, buildWeekWindow } from '@/lib/calendar-weeks'
 
 function Section({ title, children, defaultOpen = false }: {
   title: string; children: React.ReactNode; defaultOpen?: boolean
@@ -51,15 +52,10 @@ export default function DebugPanel({ projectId, year, weeks }: Props) {
     error: string | null
   } | null>(null)
 
-  const currentYear = year ?? new Date().getFullYear()
-  const currentWeek = (() => {
-    const d = new Date()
-    d.setHours(0, 0, 0, 0)
-    d.setDate(d.getDate() + 4 - (d.getDay() || 7))
-    const yearStart = new Date(d.getFullYear(), 0, 1)
-    return Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7)
-  })()
-  const defaultWeeks = weeks ?? Array.from({ length: 12 }, (_, i) => ((currentWeek - 1 + i) % 52) + 1)
+  const ref = currentIsoWeek()
+  const currentYear = year ?? ref.year
+  const currentWeek = ref.week
+  const defaultWeeks = weeks ?? buildWeekWindow(ref, 12).map((w) => w.week)
 
   async function load() {
     setLoading(true)

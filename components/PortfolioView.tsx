@@ -1,10 +1,19 @@
 'use client'
 
 import { useState, useEffect, useMemo } from 'react'
-import { AlertTriangle, Eye, CircleDashed, CheckCircle2, LayoutGrid, Loader2 } from 'lucide-react'
+import { AlertTriangle, Eye, CircleDashed, CheckCircle2, LayoutGrid, Loader2, UserX } from 'lucide-react'
 import { loadPortfolioData, type PortfolioData } from '@/app/actions/portfolio'
-import { buildPortfolioRows, spanToColumns, type PortfolioRow, type PortfolioStatus } from '@/lib/portfolio'
+import {
+  buildPortfolioRows,
+  sortPortfolioRows,
+  formatReasons,
+  spanToColumns,
+  type PortfolioRow,
+  type PortfolioStatus,
+  type PortfolioSort,
+} from '@/lib/portfolio'
 import type { PhaseKey } from '@/lib/planning-phases'
+import { currentIsoWeek } from '@/lib/calendar-weeks'
 
 // ── Layout-Konstanten ────────────────────────────────────────────────────────
 
@@ -25,6 +34,7 @@ const STATUS_STYLE: Record<PortfolioStatus, { dot: string; text: string; chip: s
   engpass: { dot: 'bg-red-500', text: 'text-red-700', chip: 'bg-red-50 border-red-200' },
   beobachten: { dot: 'bg-amber-500', text: 'text-amber-700', chip: 'bg-amber-50 border-amber-200' },
   nicht_terminiert: { dot: 'bg-slate-400', text: 'text-slate-600', chip: 'bg-slate-100 border-slate-200' },
+  ohne_zuweisung: { dot: 'bg-slate-300', text: 'text-slate-500', chip: 'bg-white border-slate-200' },
   ok: { dot: 'bg-emerald-500', text: 'text-emerald-700', chip: 'bg-emerald-50 border-emerald-200' },
 }
 
@@ -35,18 +45,14 @@ const FILTERS: { key: Filter; label: string }[] = [
   { key: 'engpass', label: 'Engpass' },
   { key: 'beobachten', label: 'Beobachten' },
   { key: 'nicht_terminiert', label: 'Nicht terminiert' },
+  { key: 'ohne_zuweisung', label: 'Ohne Zuweisung' },
   { key: 'ok', label: 'OK' },
 ]
 
-// ── Helfer ───────────────────────────────────────────────────────────────────
-
-function getCurrentWeek(): number {
-  const d = new Date()
-  d.setHours(0, 0, 0, 0)
-  d.setDate(d.getDate() + 4 - (d.getDay() || 7))
-  const yearStart = new Date(d.getFullYear(), 0, 1)
-  return Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7)
-}
+const SORTS: { key: PortfolioSort; label: string }[] = [
+  { key: 'projektnummer', label: 'Projektnummer' },
+  { key: 'dringlichkeit', label: 'Dringlichkeit' },
+]
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
@@ -61,9 +67,11 @@ export default function PortfolioView({ onOpenProject }: Props) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<Filter>('alle')
+  const [sort, setSort] = useState<PortfolioSort>('projektnummer')
 
   useEffect(() => {
-    loadPortfolioData(new Date().getFullYear(), getCurrentWeek())
+    const ref = currentIsoWeek()
+    loadPortfolioData(ref.year, ref.week)
       .then((d) => {
         setData(d)
         setLoading(false)
@@ -77,12 +85,13 @@ export default function PortfolioView({ onOpenProject }: Props) {
   const rows = useMemo<PortfolioRow[]>(() => (data ? buildPortfolioRows(data) : []), [data])
 
   const counts = useMemo(() => {
-    const c = { total: rows.length, engpass: 0, beobachten: 0, nicht_terminiert: 0, ok: 0 }
+    const c = { total: rows.length, engpass: 0, beobachten: 0, nicht_terminiert: 0, ohne_zuweisung: 0, ok: 0 }
     for (const r of rows) c[r.status]++
     return c
   }, [rows])
 
-  const visibleRows = filter === 'alle' ? rows : rows.filter((r) => r.status === filter)
+  const sortedRows = useMemo(() => sortPortfolioRows(rows, sort), [rows, sort])
+  const visibleRows = filter === 'alle' ? sortedRows : sortedRows.filter((r) => r.status === filter)
 
   // ── States ──────────────────────────────────────────────────────────────
 
@@ -122,13 +131,14 @@ export default function PortfolioView({ onOpenProject }: Props) {
     { label: 'Engpass', value: counts.engpass, icon: <AlertTriangle className="h-4 w-4 text-red-400" /> },
     { label: 'Beobachten', value: counts.beobachten, icon: <Eye className="h-4 w-4 text-amber-400" /> },
     { label: 'Nicht terminiert', value: counts.nicht_terminiert, icon: <CircleDashed className="h-4 w-4 text-slate-300" /> },
+    { label: 'Ohne Zuweisung', value: counts.ohne_zuweisung, icon: <UserX className="h-4 w-4 text-slate-300" /> },
     { label: 'OK', value: counts.ok, icon: <CheckCircle2 className="h-4 w-4 text-emerald-400" /> },
   ]
 
   return (
     <div className="space-y-4">
       {/* ── KPI-Leiste ── */}
-      <div className="grid grid-cols-5 gap-4">
+      <div className="grid grid-cols-6 gap-4">
         {kpis.map((k) => (
           <div key={k.label} className="rounded-xl border border-slate-200 bg-white p-4">
             <div className="mb-2 flex items-center gap-2">
@@ -140,24 +150,46 @@ export default function PortfolioView({ onOpenProject }: Props) {
         ))}
       </div>
 
-      {/* ── Status-Filter ── */}
-      <div className="flex flex-wrap items-center gap-2">
-        {FILTERS.map((f) => {
-          const active = filter === f.key
-          return (
-            <button
-              key={f.key}
-              onClick={() => setFilter(f.key)}
-              className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-all ${
-                active
-                  ? 'border-slate-800 bg-slate-800 text-white'
-                  : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:bg-slate-50'
-              }`}
-            >
-              {f.label}
-            </button>
-          )
-        })}
+      {/* ── Status-Filter + Sortierung ── */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {FILTERS.map((f) => {
+            const active = filter === f.key
+            return (
+              <button
+                key={f.key}
+                onClick={() => setFilter(f.key)}
+                className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-all ${
+                  active
+                    ? 'border-slate-800 bg-slate-800 text-white'
+                    : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:bg-slate-50'
+                }`}
+              >
+                {f.label}
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-400">Sortierung</span>
+          <div className="flex gap-1 rounded-lg border border-slate-200 bg-white p-0.5">
+            {SORTS.map((s) => {
+              const active = sort === s.key
+              return (
+                <button
+                  key={s.key}
+                  onClick={() => setSort(s.key)}
+                  className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
+                    active ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-50'
+                  }`}
+                >
+                  {s.label}
+                </button>
+              )
+            })}
+          </div>
+        </div>
       </div>
 
       {/* ── Portfolio-Tabelle ── */}
@@ -212,7 +244,7 @@ export default function PortfolioView({ onOpenProject }: Props) {
                   {/* Status / Ampel */}
                   <div style={{ width: STATUS_COL, minWidth: STATUS_COL }} className="flex items-center border-r border-slate-100 px-3 py-2.5">
                     <span
-                      title={row.reasons.join(' · ')}
+                      title={formatReasons(row.reasons)}
                       className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] font-medium ${s.chip} ${s.text}`}
                     >
                       <span className={`h-2 w-2 rounded-full ${s.dot}`} />
@@ -278,12 +310,13 @@ export default function PortfolioView({ onOpenProject }: Props) {
       {/* ── Legende ── */}
       <div className="flex flex-wrap items-center gap-x-6 gap-y-2 px-1 text-xs text-slate-500">
         <span className="font-medium text-slate-400">Status:</span>
-        {(['engpass', 'beobachten', 'nicht_terminiert', 'ok'] as PortfolioStatus[]).map((st) => (
+        {(['engpass', 'beobachten', 'nicht_terminiert', 'ohne_zuweisung', 'ok'] as PortfolioStatus[]).map((st) => (
           <span key={st} className="flex items-center gap-1.5">
             <span className={`h-2.5 w-2.5 rounded-full ${STATUS_STYLE[st].dot}`} />
             {st === 'engpass' && 'Engpass (>105 %)'}
             {st === 'beobachten' && 'Beobachten (90–105 % · außerhalb Phase · unvollständig)'}
-            {st === 'nicht_terminiert' && 'Nicht terminiert / ohne Zuweisung'}
+            {st === 'nicht_terminiert' && 'Nicht terminiert (kein Terminplan)'}
+            {st === 'ohne_zuweisung' && 'Ohne Zuweisung (terminiert, keine Allocation)'}
             {st === 'ok' && 'OK'}
           </span>
         ))}

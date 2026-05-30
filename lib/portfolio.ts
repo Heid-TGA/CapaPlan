@@ -25,8 +25,20 @@ export const WATCH_THRESHOLD = 0.9
 
 // ── Typen ────────────────────────────────────────────────────────────────────
 
-/** KPI-/Filter-Bucket. Grau-Fälle (kein Terminplan / ohne Zuweisung) landen in „nicht_terminiert". */
-export type PortfolioStatus = 'engpass' | 'beobachten' | 'nicht_terminiert' | 'ok'
+/** KPI-/Filter-Bucket. „nicht_terminiert" = kein Terminplan, „ohne_zuweisung" = terminiert ohne Allocation. */
+export type PortfolioStatus = 'engpass' | 'beobachten' | 'nicht_terminiert' | 'ohne_zuweisung' | 'ok'
+
+/** Sortiermodus der Portfolio-Tabelle. */
+export type PortfolioSort = 'projektnummer' | 'dringlichkeit'
+
+/** Dringlichkeitsreihenfolge (kleiner = dringender). */
+const URGENCY_ORDER: Record<PortfolioStatus, number> = {
+  engpass: 0,
+  beobachten: 1,
+  ohne_zuweisung: 2,
+  nicht_terminiert: 3,
+  ok: 4,
+}
 
 export interface PhaseSpan {
   key: PhaseKey
@@ -170,22 +182,25 @@ export function computeProjectStatus(args: {
 
   // 2) Grau — terminiert, aber keine Zuweisung im Zeitraum.
   if (projectAllocations.length === 0) {
-    return { status: 'nicht_terminiert', label: 'Ohne Zuweisung', reasons: ['Keine Zuweisung im Zeitraum'] }
+    return { status: 'ohne_zuweisung', label: 'Ohne Zuweisung', reasons: ['Keine Zuweisung im Zeitraum'] }
   }
 
   const assigned = [...new Set(projectAllocations.map((a) => a.employee_id))]
   const spanWeeks = weeks.filter((w) => spans.some((s) => weekInSpan(w, s)))
 
   // 3) Rot — ein zugewiesener MA innerhalb der Phase global > 105 %.
-  //    Gleichzeitig 90–105 % für die spätere Gelb-Entscheidung merken.
+  //    Gleichzeitig 90–105 % (inkl. konkretem Beispiel) für die Gelb-Entscheidung merken.
   let watchLoad = false
+  let watchExample: string | null = null
   for (const empId of assigned) {
     for (const w of spanWeeks) {
       const load = globalLoad.get(`${empId}|${w.year}|${w.week}`) ?? 0
+      const name = employeeNames.get(empId) ?? 'MA'
       if (load > OVERLOAD_THRESHOLD) {
-        reasons.push(`${employeeNames.get(empId) ?? 'MA'} · KW ${w.week}: ${Math.round(load * 100)} %`)
+        reasons.push(`${name} · KW ${w.week}: ${Math.round(load * 100)} %`)
       } else if (load >= WATCH_THRESHOLD) {
         watchLoad = true
+        if (!watchExample) watchExample = `${name} · KW ${w.week}: ${Math.round(load * 100)} %`
       }
     }
   }
@@ -228,7 +243,7 @@ export function computeProjectStatus(args: {
     if (gap) reasons.push(`≥ ${INCOMPLETE_GAP_WEEKS} Leerwochen in laufender Phase`)
   }
 
-  if (watchLoad) reasons.unshift('Auslastung 90–105 %')
+  if (watchLoad) reasons.unshift(watchExample ?? 'Auslastung 90–105 %')
 
   if (watchLoad || outside || gap) {
     return { status: 'beobachten', label: 'Beobachten', reasons }
@@ -262,4 +277,28 @@ export function buildPortfolioRows(data: PortfolioData): PortfolioRow[] {
       reasons: result.reasons,
     }
   })
+}
+
+// ── Sortierung & Tooltip-Aufbereitung ────────────────────────────────────────
+
+/** Sortiert die Zeilen. „dringlichkeit" zuerst nach Status (Engpass→OK), sonst Projektnummer;
+ *  innerhalb gleicher Dringlichkeit ebenfalls nach Projektnummer. */
+export function sortPortfolioRows(rows: PortfolioRow[], mode: PortfolioSort): PortfolioRow[] {
+  const byNumber = (a: PortfolioRow, b: PortfolioRow) =>
+    a.project.project_number.localeCompare(b.project.project_number, 'de', { numeric: true })
+
+  const copy = [...rows]
+  if (mode === 'dringlichkeit') {
+    copy.sort((a, b) => URGENCY_ORDER[a.status] - URGENCY_ORDER[b.status] || byNumber(a, b))
+  } else {
+    copy.sort(byNumber)
+  }
+  return copy
+}
+
+/** Tooltip-Text: max. `max` Gründe (bereits nach Wichtigkeit geordnet), Rest als „+ x weitere Hinweise". */
+export function formatReasons(reasons: string[], max = 3): string {
+  if (reasons.length <= max) return reasons.join(' · ')
+  const rest = reasons.length - max
+  return `${reasons.slice(0, max).join(' · ')} · + ${rest} weitere Hinweise`
 }

@@ -10,6 +10,7 @@ import {
   type LphSchedule,
   type Milestone,
 } from '@/app/actions/terminplan'
+import { currentIsoWeek, addWeeks, buildWeekWindow } from '@/lib/calendar-weeks'
 
 const PLANNING_PHASES = [
   { key: 'basic',       label: 'Basic Design',  lph: [1, 2, 3, 4] },
@@ -55,19 +56,11 @@ export default function TerminplanSheet({ projectId, projectName, onClose, onSav
   const [msError, setMsError] = useState<string | null>(null)
 
   const currentYear = new Date().getFullYear()
-  const currentWeek = (() => {
-    const d = new Date()
-    d.setHours(0, 0, 0, 0)
-    d.setDate(d.getDate() + 4 - (d.getDay() || 7))
-    const ys = new Date(d.getFullYear(), 0, 1)
-    return Math.ceil(((d.getTime() - ys.getTime()) / 86400000 + 1) / 7)
-  })()
+  const today = currentIsoWeek()
+  const currentWeek = today.week
 
   // KW-Fenster: 4 Wochen zurück bis 24 voraus
-  const weeks = Array.from({ length: 28 }, (_, i) => {
-    const kw = ((currentWeek - 4 + i - 1 + 52) % 52) + 1
-    return kw
-  })
+  const weeks = buildWeekWindow(addWeeks(today, -4), 28).map((w) => w.week)
 
   useEffect(() => {
     loadTerminplan(projectId)
