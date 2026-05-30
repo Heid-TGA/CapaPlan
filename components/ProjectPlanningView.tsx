@@ -197,9 +197,6 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   function isInRange(kw: number): boolean {
     return !!(activeSchedule?.start_kw && activeSchedule?.end_kw && kw >= activeSchedule.start_kw && kw <= activeSchedule.end_kw)
   }
-  function getMilestonesForKw(kw: number): Milestone[] {
-    return milestones.filter(m => m.kw === kw && m.lph_number === activeLph)
-  }
   function msTooltip(m: Milestone): string {
     return `${m.description} · KW ${String(m.kw).padStart(2, '0')}/${m.year}`
   }
@@ -506,23 +503,11 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
               <div style={{ width: CAP_COL, minWidth: CAP_COL }} className="py-2 text-xs font-medium text-slate-400 text-center border-r border-slate-100">Kap/Wo</div>
               {weeks.map((kw, i) => {
                 const inRange = isInRange(kw)
-                const kwMs = getMilestonesForKw(kw)
                 const isHI = i < H_I_WEEKS
                 return (
                   <div key={kw}
                     style={{ width: COL_WIDTH, minWidth: COL_WIDTH }}
                     className={`py-1 text-center border-r border-slate-100 ${isHI ? 'bg-blue-50' : inRange ? 'bg-amber-50' : ''}`}>
-                    {kwMs.length > 0 && (
-                      <div className="flex gap-0.5 justify-center mb-0.5">
-                        {kwMs.map(m => (
-                          <div key={m.id} title={msTooltip(m)} className="cursor-help">
-                            {m.type === 'external'
-                              ? <X className="h-3 w-3 text-red-600" strokeWidth={3} />
-                              : <Circle className="h-2.5 w-2.5 text-blue-500 fill-blue-500" />}
-                          </div>
-                        ))}
-                      </div>
-                    )}
                     <span className={`text-[10px] font-medium ${kw === currentWeek ? 'text-blue-600 font-bold' : 'text-slate-500'}`}>
                       {kw === currentWeek ? '▸' : ''}KW {kw}
                     </span>
