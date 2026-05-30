@@ -1,10 +1,10 @@
 'use client'
 
 import { useState, useTransition, useEffect, useRef } from 'react'
-import { TrendingDown, Users, Clock, Euro, Flag, Circle, ChevronRight, Plus } from 'lucide-react'
+import { TrendingDown, Users, Clock, Euro, Circle, ChevronRight, Plus, X } from 'lucide-react'
 import { upsertAllocation, getLphBudgetStatus } from '@/app/actions/allocation'
 import { loadProjectAllocations } from '@/app/actions/heatmap'
-import { loadTerminplan, saveLphSchedule, type LphSchedule, type Milestone } from '@/app/actions/terminplan'
+import { loadTerminplan, saveLphSchedule, saveMilestone, type LphSchedule, type Milestone } from '@/app/actions/terminplan'
 import { ALL_LPH, LPH_LABELS } from '@/lib/planning-phases'
 import GanttBar from './GanttBar'
 
@@ -65,6 +65,15 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const [schedules, setSchedules] = useState<LphSchedule[]>([])
   const [milestones, setMilestones] = useState<Milestone[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Meilenstein-Formular (MVP, KW-basiert)
+  const [showMsForm, setShowMsForm] = useState(false)
+  const [msDesc, setMsDesc] = useState('')
+  const [msKw, setMsKw] = useState('')
+  const [msYear, setMsYear] = useState('')
+  const [msLph, setMsLph] = useState<number | null>(null)
+  const [msSaving, setMsSaving] = useState(false)
+  const [msError, setMsError] = useState<string | null>(null)
 
   const currentWeek = getCurrentWeek()
   const currentYear = new Date().getFullYear()
@@ -162,6 +171,47 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   function getMilestonesForKw(kw: number): Milestone[] {
     return milestones.filter(m => m.kw === kw && m.lph_number === activeLph)
   }
+  function msTooltip(m: Milestone): string {
+    return `${m.description} · KW ${String(m.kw).padStart(2, '0')}/${m.year}`
+  }
+
+  // ── Meilenstein-MVP ──────────────────────────────────────────────────────────
+
+  function openMsForm() {
+    const sorted = [...schedules].sort((a, b) => a.lph_number - b.lph_number)
+    setMsDesc('')
+    setMsKw(String(currentWeek))
+    setMsYear(String(currentYear))
+    setMsLph(activeLph != null && availableLph.has(activeLph) ? activeLph : (sorted[0]?.lph_number ?? null))
+    setMsError(null)
+    setShowMsForm(true)
+  }
+
+  async function handleSaveMilestone() {
+    if (!selectedProject || msLph == null) return
+    const desc = msDesc.trim()
+    const kw = parseInt(msKw, 10)
+    const year = parseInt(msYear, 10)
+    if (!desc) { setMsError('Beschreibung fehlt'); return }
+    if (!(kw >= 1 && kw <= 53)) { setMsError('KW muss 1–53 sein'); return }
+    if (!(year >= 2024 && year <= 2099)) { setMsError('Jahr ungültig'); return }
+    const sched = schedules.find(s => s.lph_number === msLph)
+    if (!sched) { setMsError('LPH ohne Budget'); return }   // nur LPH mit vorhandener lph_id
+    setMsSaving(true); setMsError(null)
+    try {
+      const res = await saveMilestone(selectedProject.id, sched.lph_id, kw, year, 'external', desc)
+      if (!res.success || !res.id) { setMsError(res.message || 'Speichern fehlgeschlagen'); return }
+      setMilestones(prev => [...prev, {
+        id: res.id!, lph_id: sched.lph_id, lph_number: sched.lph_number,
+        kw, year, type: 'external', description: desc,
+      }])
+      setShowMsForm(false)
+    } catch (e) {
+      setMsError(e instanceof Error ? e.message : 'Speichern fehlgeschlagen')
+    } finally {
+      setMsSaving(false)
+    }
+  }
 
   // ── Alloc-Helpers ──────────────────────────────────────────────────────────────
 
@@ -256,15 +306,11 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
         {/* Matrix-Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100">
-          <div>
-            <p className="text-sm font-semibold text-slate-700">Terminplan & Ressourcen</p>
-            <p className="text-xs text-slate-400">{activeLph != null ? `LPH ${activeLph}: ${LPH_LABELS[activeLph]}` : 'Keine LPH ausgewählt'}</p>
-          </div>
-          <div className="flex items-center gap-3 text-xs text-slate-400">
-            {isPending && <span className="text-amber-500 animate-pulse">Speichern…</span>}
-            <span className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-blue-50 text-blue-600 text-[10px] font-medium">H&I-Zone (KW 1–{H_I_WEEKS})</span>
-            <span className="flex items-center gap-1"><Flag className="h-3 w-3 text-red-500 fill-red-500" />Extern</span>
-            <span className="flex items-center gap-1"><Circle className="h-3 w-3 text-blue-500 fill-blue-500" />Intern</span>
+          <div className="flex items-center gap-3">
+            <div>
+              <p className="text-sm font-semibold text-slate-700">Terminplan & Ressourcen</p>
+              <p className="text-xs text-slate-400">{activeLph != null ? `LPH ${activeLph}: ${LPH_LABELS[activeLph]}` : 'Keine LPH ausgewählt'}</p>
+            </div>
 
             {/* LPH hinzufügen */}
             <div className="relative">
@@ -275,7 +321,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
               {showLphPicker && (
                 <>
                   <div className="fixed inset-0 z-40" onClick={() => setShowLphPicker(false)} />
-                  <div className="absolute right-0 top-full mt-2 z-50 w-80 bg-white rounded-xl border border-slate-200 shadow-xl p-2">
+                  <div className="absolute left-0 top-full mt-2 z-50 w-80 bg-white rounded-xl border border-slate-200 shadow-xl p-2">
                     <p className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-400">Leistungsphasen anzeigen</p>
                     {ALL_LPH.map(n => {
                       const available = availableLph.has(n)
@@ -295,6 +341,67 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                 </>
               )}
             </div>
+
+            {/* Meilenstein hinzufügen */}
+            <div className="relative">
+              <button onClick={() => (showMsForm ? setShowMsForm(false) : openMsForm())}
+                disabled={availableLph.size === 0}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 text-xs font-medium hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                <Plus className="h-3.5 w-3.5" />Meilenstein
+              </button>
+              {showMsForm && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setShowMsForm(false)} />
+                  <div className="absolute left-0 top-full mt-2 z-50 w-72 bg-white rounded-xl border border-slate-200 shadow-xl p-3">
+                    <p className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-widest text-slate-400">Meilenstein hinzufügen</p>
+                    {availableLph.size === 0 ? (
+                      <p className="px-1 py-2 text-xs text-slate-400">Keine LPH mit Budget vorhanden.</p>
+                    ) : (
+                      <div className="space-y-2.5 px-1">
+                        <div>
+                          <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Beschreibung</label>
+                          <input type="text" value={msDesc} onChange={e => setMsDesc(e.target.value)} placeholder="z. B. Bauantrag"
+                            className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-slate-800" />
+                        </div>
+                        <div className="flex gap-2">
+                          <div className="flex-1">
+                            <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">KW</label>
+                            <input type="number" min="1" max="53" value={msKw} onChange={e => setMsKw(e.target.value)}
+                              className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-center text-slate-800" />
+                          </div>
+                          <div className="flex-1">
+                            <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Jahr</label>
+                            <input type="number" min="2024" max="2099" value={msYear} onChange={e => setMsYear(e.target.value)}
+                              className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-center text-slate-800" />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Leistungsphase</label>
+                          <select value={msLph ?? ''} onChange={e => setMsLph(Number(e.target.value))}
+                            className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-slate-800 bg-white">
+                            {[...schedules].sort((a, b) => a.lph_number - b.lph_number).map(s => (
+                              <option key={s.lph_id} value={s.lph_number}>LPH {s.lph_number}: {LPH_LABELS[s.lph_number]}</option>
+                            ))}
+                          </select>
+                        </div>
+                        {msError && <p className="text-[11px] text-red-500">{msError}</p>}
+                        <button onClick={handleSaveMilestone} disabled={msSaving}
+                          className="w-full py-1.5 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 transition-colors disabled:opacity-50">
+                          {msSaving ? 'Speichern…' : 'Meilenstein speichern'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 text-xs text-slate-400">
+            {isPending && <span className="text-amber-500 animate-pulse">Speichern…</span>}
+            <span className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-blue-50 text-blue-600 text-[10px] font-medium">H&I-Zone (KW 1–{H_I_WEEKS})</span>
+            <span className="flex items-center gap-1"><X className="h-3 w-3 text-red-600" strokeWidth={3} />Extern</span>
+            <span className="flex items-center gap-1"><Circle className="h-3 w-3 text-blue-500 fill-blue-500" />Intern</span>
           </div>
         </div>
 
@@ -364,8 +471,10 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                     {kwMs.length > 0 && (
                       <div className="flex gap-0.5 justify-center mb-0.5">
                         {kwMs.map(m => (
-                          <div key={m.id} title={m.description} className="cursor-help">
-                            {m.type === 'external' ? <Flag className="h-2.5 w-2.5 text-red-500 fill-red-500" /> : <Circle className="h-2.5 w-2.5 text-blue-500 fill-blue-500" />}
+                          <div key={m.id} title={msTooltip(m)} className="cursor-help">
+                            {m.type === 'external'
+                              ? <X className="h-3 w-3 text-red-600" strokeWidth={3} />
+                              : <Circle className="h-2.5 w-2.5 text-blue-500 fill-blue-500" />}
                           </div>
                         ))}
                       </div>

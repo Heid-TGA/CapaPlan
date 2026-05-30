@@ -29,19 +29,20 @@ Bedarf Überschrift per Grep verifizieren):
 
 | § | Thema | ab Zeile |
 |---|---|---|
-| 4 | Environment Variables | 49 |
-| 5 | Vollständige Dateistruktur | 60 |
-| 6 | Architektur (proxy.ts, 'use server', Tailwind 4, Clients) | 111 |
-| 7 | Rollen & Auth (TL/PL) | 145 |
-| 8 | Planungsschritte / LPH | 157 |
-| 9 | Import-Logik (Abacus, H&I, JSON-Formate) | 171 |
-| 10 | Datenbank-Schema | 216 |
-| 11 | RLS-Policies (FOR INSERT WITH CHECK) | 278 |
-| 12 | RPC-Funktionen (SECURITY DEFINER) | 303 |
-| 13 | Server Actions | 317 |
-| 14 | Komponenten | 339 |
-| 16 | Bekannte User | 383 |
-| 17 | Design-System | 395 |
+| 4 | Environment Variables | 50 |
+| 5 | Vollständige Dateistruktur | 61 |
+| 6 | Architektur (proxy.ts, 'use server', Tailwind 4, Clients) | 121 |
+| 7 | Rollen & Auth (TL/PL) | 155 |
+| 8 | Leistungsphasen (LPH) & Planungsschritte | 167 |
+| 9 | Import-Logik (Abacus, H&I, JSON-Formate) | 193 |
+| 10 | Datenbank-Schema | 238 |
+| 11 | RLS-Policies (FOR INSERT WITH CHECK) | 300 |
+| 12 | RPC-Funktionen (SECURITY DEFINER) | 325 |
+| 13 | Server Actions | 339 |
+| 14 | Komponenten (Cockpit, Portfolio-Buckets) | 375 |
+| 16 | Bekannte User | 431 |
+| 17 | Design-System | 443 |
+| 20 | Aktueller Stand & offene Punkte | 487 |
 
 ## Repo-Karte (vermeidet Suchen)
 

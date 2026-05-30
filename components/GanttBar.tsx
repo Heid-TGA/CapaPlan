@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { Flag, Circle, GripVertical } from 'lucide-react'
+import { X, Circle, GripVertical } from 'lucide-react'
 import type { Milestone } from '@/app/actions/terminplan'
 
 interface GanttBarProps {
@@ -236,9 +236,10 @@ export default function GanttBar({
             const pct = barCols > 1 ? (mi / (barCols-1)) * 100 : 50
             return (
               <div key={m.id} className="absolute inset-y-0 flex items-end pb-0.5 pointer-events-none"
-                style={{ left: `${pct}%`, transform: 'translateX(-50%)' }} title={m.description}>
+                style={{ left: `${pct}%`, transform: 'translateX(-50%)' }}
+                title={`${m.description} · KW ${String(m.kw).padStart(2, '0')}/${m.year}`}>
                 {m.type === 'external'
-                  ? <Flag className="h-2.5 w-2.5 text-white fill-white" />
+                  ? <span className="flex h-3 w-3 items-center justify-center rounded-full bg-white"><X className="h-2.5 w-2.5 text-red-600" strokeWidth={3} /></span>
                   : <Circle className="h-2.5 w-2.5 text-white/70 fill-white/70" />}
               </div>
             )
