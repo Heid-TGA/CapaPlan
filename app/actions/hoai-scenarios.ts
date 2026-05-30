@@ -22,6 +22,7 @@ export interface HoaiScenario {
   honorar_pct: number
   is_dummy: boolean
   is_active: boolean
+  area_id: string | null
   created_at: string
 }
 
@@ -29,6 +30,7 @@ interface CreateHoaiScenarioInput {
   label: string
   anrechenbare_kosten: number
   honorar_pct: number
+  area_id?: string | null
 }
 
 interface UpdateHoaiScenarioPatch {
@@ -36,10 +38,11 @@ interface UpdateHoaiScenarioPatch {
   anrechenbare_kosten?: number
   honorar_pct?: number
   is_active?: boolean
+  area_id?: string | null
 }
 
 const SELECT_COLS =
-  'id, project_id, label, anrechenbare_kosten, honorar_pct, is_dummy, is_active, created_at'
+  'id, project_id, label, anrechenbare_kosten, honorar_pct, is_dummy, is_active, area_id, created_at'
 
 // ── Validierungs-Helfer ────────────────────────────────────────────────────
 function validLabel(v: unknown): v is string {
@@ -50,6 +53,29 @@ function validKosten(v: unknown): v is number {
 }
 function validPct(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 100
+}
+
+// Prueft, dass ein Budgetbereich existiert UND zum erwarteten Projekt gehoert.
+// Damit kann kein fremder Bereich (auch kein eigener aus einem anderen Projekt)
+// an ein Szenario gehaengt werden. RLS erzwingt diese Projektgleichheit nicht,
+// deshalb hier explizit. Liefert ok=false mit Meldung bei Verstoss.
+async function areaBelongsToProject(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  areaId: string,
+  projectId: string
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { data, error } = await supabase
+    .from('project_budget_areas')
+    .select('id, project_id')
+    .eq('id', areaId)
+    .maybeSingle()
+
+  if (error) return { ok: false, message: error.message }
+  if (!data) return { ok: false, message: 'Budgetbereich nicht gefunden oder kein Zugriff.' }
+  if (data.project_id !== projectId) {
+    return { ok: false, message: 'Budgetbereich gehoert nicht zu diesem Projekt.' }
+  }
+  return { ok: true }
 }
 
 // Alle Szenarien eines Projekts laden (RLS beschraenkt auf erlaubte Projekte).
@@ -88,6 +114,15 @@ export async function createHoaiScenario(
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return { success: false, message: 'Nicht angemeldet.' }
 
+  // area_id ist optional. Wenn gesetzt, muss der Bereich zum SELBEN Projekt
+  // gehoeren (sonst Ablehnung). null/undefined -> keine Zuordnung.
+  const areaId = payload.area_id ?? null
+  if (areaId !== null) {
+    if (typeof areaId !== 'string') return { success: false, message: 'Ungueltige area_id.' }
+    const check = await areaBelongsToProject(supabase, areaId, projectId)
+    if (!check.ok) return { success: false, message: check.message }
+  }
+
   const { data, error } = await supabase
     .from('hoai_calc_scenarios')
     .insert({
@@ -96,6 +131,7 @@ export async function createHoaiScenario(
       anrechenbare_kosten: payload.anrechenbare_kosten,
       honorar_pct: payload.honorar_pct,
       is_dummy: true, // immer Dummy — kein rechtsverbindliches HOAI-Ergebnis
+      area_id: areaId,
       created_by: user.id,
     })
     .select(SELECT_COLS)
@@ -137,6 +173,30 @@ export async function updateHoaiScenario(
   }
 
   const supabase = await createClient()
+
+  // area_id optional. null -> Zuordnung entfernen. Bei gesetztem Wert muss der
+  // Bereich zum Projekt DIESES Szenarios gehoeren -> Szenario erst laden, um
+  // dessen project_id zu erhalten (RLS-gescoped: PL sieht fremde Zeilen nicht).
+  if (patch.area_id !== undefined) {
+    const areaId = patch.area_id
+    if (areaId === null) {
+      update.area_id = null
+    } else if (typeof areaId !== 'string') {
+      return { success: false, message: 'Ungueltige area_id.' }
+    } else {
+      const { data: scenario, error: selErr } = await supabase
+        .from('hoai_calc_scenarios')
+        .select('project_id')
+        .eq('id', id)
+        .maybeSingle()
+      if (selErr) return { success: false, message: selErr.message }
+      if (!scenario) return { success: false, message: 'Szenario nicht gefunden oder kein Zugriff.' }
+      const check = await areaBelongsToProject(supabase, areaId, scenario.project_id)
+      if (!check.ok) return { success: false, message: check.message }
+      update.area_id = areaId
+    }
+  }
+
   const { data, error } = await supabase
     .from('hoai_calc_scenarios')
     .update(update)

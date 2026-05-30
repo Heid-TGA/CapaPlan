@@ -23,6 +23,11 @@ import {
   deleteHoaiScenario,
   type HoaiScenario,
 } from '@/app/actions/hoai-scenarios'
+import {
+  loadProjectBudgetAreas,
+  ensureDefaultBudgetAreas,
+  type BudgetArea,
+} from '@/app/actions/budget-areas'
 
 interface Props {
   projectId: string
@@ -50,11 +55,19 @@ export default function HoaiCalculatorModal({ projectId, projectName, onClose }:
   const [input, setInput] = useState('')
   const [pctInput, setPctInput] = useState(String(HOAI_DUMMY_HONORAR_PCT))
 
+  const [areaId, setAreaId] = useState<string>('') // '' = Ohne Bereich / Gesamt
+
   const [scenarios, setScenarios] = useState<HoaiScenario[]>([])
+  const [areas, setAreas] = useState<BudgetArea[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [seeding, setSeeding] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  // Bereichsname zu einer area_id (fuer die Szenario-Liste).
+  const areaName = (id: string | null): string =>
+    id ? (areas.find((a) => a.id === id)?.name ?? 'Bereich gelöscht') : 'ohne Bereich'
 
   const kosten = parseGermanNumber(input)
   const hasValue = Number.isFinite(kosten) && kosten > 0
@@ -64,20 +77,37 @@ export default function HoaiCalculatorModal({ projectId, projectName, onClose }:
 
   const canSave = hasValue && hasPct && label.trim() !== '' && !saving
 
-  // Gespeicherte Szenarien beim Oeffnen laden.
+  // Gespeicherte Szenarien + Budgetbereiche beim Oeffnen laden.
   useEffect(() => {
     let cancelled = false
     setLoading(true)
-    loadHoaiScenarios(projectId)
-      .then((res) => {
+    Promise.all([loadHoaiScenarios(projectId), loadProjectBudgetAreas(projectId)])
+      .then(([scRes, arRes]) => {
         if (cancelled) return
-        if (res.success) setScenarios(res.data)
-        else { setScenarios([]); setError(res.message) }
+        if (scRes.success) setScenarios(scRes.data)
+        else { setScenarios([]); setError(scRes.message) }
+        if (arRes.success) setAreas(arRes.data)
+        else setAreas([])
       })
       .catch((e) => { if (!cancelled) { setScenarios([]); setError(e instanceof Error ? e.message : 'Laden fehlgeschlagen') } })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [projectId])
+
+  // Standardbereiche (HLS/Elektro/Sonstige) fuer dieses Projekt anlegen.
+  async function handleSeedAreas() {
+    if (seeding) return
+    setSeeding(true); setError(null)
+    try {
+      const res = await ensureDefaultBudgetAreas(projectId)
+      if (res.success) setAreas(res.data)
+      else setError(res.message || 'Bereiche konnten nicht angelegt werden')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Bereiche konnten nicht angelegt werden')
+    } finally {
+      setSeeding(false)
+    }
+  }
 
   async function handleSave() {
     if (!canSave) return
@@ -87,6 +117,7 @@ export default function HoaiCalculatorModal({ projectId, projectName, onClose }:
         label: label.trim(),
         anrechenbare_kosten: kosten,
         honorar_pct: pct,
+        area_id: areaId || null,
       })
       if (!res.success || !res.data) { setError(res.message || 'Speichern fehlgeschlagen'); return }
       setScenarios((prev) => [res.data!, ...prev])
@@ -102,6 +133,8 @@ export default function HoaiCalculatorModal({ projectId, projectName, onClose }:
     setLabel(s.label)
     setInput(new Intl.NumberFormat('de-DE', { maximumFractionDigits: 2 }).format(s.anrechenbare_kosten))
     setPctInput(String(s.honorar_pct))
+    // Bereich nur uebernehmen, wenn er noch existiert; sonst auf "Gesamt".
+    setAreaId(s.area_id && areas.some((a) => a.id === s.area_id) ? s.area_id : '')
     setError(null)
   }
 
@@ -168,6 +201,36 @@ export default function HoaiCalculatorModal({ projectId, projectName, onClose }:
                 placeholder="z. B. Angebot v1"
                 className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-slate-400 text-slate-800"
               />
+            </div>
+            <div>
+              <label htmlFor="hoai-area" className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">
+                Budgetbereich
+              </label>
+              {areas.length === 0 ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400">Keine Bereiche angelegt.</span>
+                  <button
+                    type="button"
+                    onClick={handleSeedAreas}
+                    disabled={seeding}
+                    className="px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-slate-700 text-[11px] font-medium hover:bg-slate-50 transition-colors disabled:opacity-50"
+                  >
+                    {seeding ? 'Anlegen…' : 'Standardbereiche anlegen'}
+                  </button>
+                </div>
+              ) : (
+                <select
+                  id="hoai-area"
+                  value={areaId}
+                  onChange={(e) => setAreaId(e.target.value)}
+                  className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-slate-400 text-slate-800 bg-white"
+                >
+                  <option value="">Ohne Bereich / Gesamt</option>
+                  {areas.map((a) => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))}
+                </select>
+              )}
             </div>
             <div className="flex gap-2">
               <div className="flex-1">
@@ -272,7 +335,9 @@ export default function HoaiCalculatorModal({ projectId, projectName, onClose }:
                   return (
                     <div key={s.id} className="flex items-center gap-2 px-3 py-2 hover:bg-slate-50/60">
                       <button onClick={() => handleLoad(s)} className="flex-1 text-left min-w-0" title="Werte laden">
-                        <p className="text-xs font-medium text-slate-700 truncate">{s.label}</p>
+                        <p className="text-xs font-medium text-slate-700 truncate">
+                          {s.label} <span className="font-normal text-slate-400">· {areaName(s.area_id)}</span>
+                        </p>
                         <p className="text-[10px] text-slate-400 truncate">
                           {fmtEur(s.anrechenbare_kosten)} · {s.honorar_pct}% → {fmtEur(total)}
                         </p>
