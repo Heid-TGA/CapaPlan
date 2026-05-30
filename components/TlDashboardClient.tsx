@@ -1,7 +1,8 @@
 'use client'
 
 import { useState } from 'react'
-import { LayoutGrid, Users } from 'lucide-react'
+import { LayoutGrid, Users, FolderKanban } from 'lucide-react'
+import PortfolioView from './PortfolioView'
 import ProjectPlanningView from './ProjectPlanningView'
 import EmployeeHeatmapView from './EmployeeHeatmapView'
 
@@ -24,23 +25,36 @@ interface Props {
   employees: Employee[]
 }
 
-type Tab = 'projekte' | 'ressourcen'
+type Tab = 'portfolio' | 'teamkapazitaet' | 'projektplanung'
 
 export default function TlDashboardClient({ projects, employees }: Props) {
-  const [activeTab, setActiveTab] = useState<Tab>('projekte')
+  const [activeTab, setActiveTab] = useState<Tab>('portfolio')
+  const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>(undefined)
+
+  // Klick auf eine Projektzeile im Portfolio → Projektplanung mit Vorauswahl.
+  function handleOpenProject(projectId: string) {
+    setSelectedProjectId(projectId)
+    setActiveTab('projektplanung')
+  }
 
   const tabs: { id: Tab; label: string; icon: React.ReactNode; description: string }[] = [
     {
-      id: 'projekte',
-      label: 'Projekt-Ansicht',
+      id: 'portfolio',
+      label: 'Portfolio',
       icon: <LayoutGrid className="h-4 w-4" />,
-      description: 'Stunden je Projekt und Leistungsphase',
+      description: 'Alle Projekte über 12 Wochen',
     },
     {
-      id: 'ressourcen',
-      label: 'Mitarbeiter-Ressourcen',
+      id: 'teamkapazitaet',
+      label: 'Teamkapazität',
       icon: <Users className="h-4 w-4" />,
       description: 'Projektübergreifende Auslastung',
+    },
+    {
+      id: 'projektplanung',
+      label: 'Projektplanung',
+      icon: <FolderKanban className="h-4 w-4" />,
+      description: 'Stunden je Projekt und Leistungsphase',
     },
   ]
 
@@ -66,9 +80,7 @@ export default function TlDashboardClient({ projects, employees }: Props) {
             </span>
             <div>
               <p className="font-medium leading-tight">{tab.label}</p>
-              <p className={`text-[11px] leading-tight mt-0.5 ${
-                activeTab === tab.id ? 'text-slate-400' : 'text-slate-400'
-              }`}>
+              <p className="text-[11px] leading-tight mt-0.5 text-slate-400">
                 {tab.description}
               </p>
             </div>
@@ -77,12 +89,20 @@ export default function TlDashboardClient({ projects, employees }: Props) {
       </div>
 
       {/* ── Tab-Inhalt ── */}
-      {activeTab === 'projekte' && (
-        <ProjectPlanningView projects={projects} employees={employees} />
+      {activeTab === 'portfolio' && (
+        <PortfolioView onOpenProject={handleOpenProject} />
       )}
 
-      {activeTab === 'ressourcen' && (
+      {activeTab === 'teamkapazitaet' && (
         <EmployeeHeatmapView />
+      )}
+
+      {activeTab === 'projektplanung' && (
+        <ProjectPlanningView
+          projects={projects}
+          employees={employees}
+          initialProjectId={selectedProjectId}
+        />
       )}
     </div>
   )

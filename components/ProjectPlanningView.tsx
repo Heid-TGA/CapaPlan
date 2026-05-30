@@ -28,7 +28,7 @@ interface Employee { id: string; name: string; role_type: string; department: st
 interface Allocation { hours: number; source: 'H&I' | 'Manuell_PL' }
 type AllocMap = Record<string, Record<number, Allocation>>
 interface LphBudget { lph_number: number; budget_eur: number; allocated_eur: number; remaining_eur: number; utilization_pct: number; total_hours: number }
-interface Props { projects: Project[]; employees: Employee[] }
+interface Props { projects: Project[]; employees: Employee[]; initialProjectId?: string }
 
 const DUMMY_EMPLOYEES: Employee[] = [
   { id: 'dummy-zeichner-arch', name: 'N.N. Zeichner Architektur', role_type: 'Zeichner',     department: 'Architektur', weekly_capacity_hours: 40 },
@@ -49,8 +49,10 @@ function fmtEur(n: number) {
 
 // ── Haupt-Komponente ───────────────────────────────────────────────────────────
 
-export default function ProjectPlanningView({ projects, employees }: Props) {
-  const [selectedProject, setSelectedProject] = useState<Project | null>(projects[0] ?? null)
+export default function ProjectPlanningView({ projects, employees, initialProjectId }: Props) {
+  const [selectedProject, setSelectedProject] = useState<Project | null>(
+    projects.find(p => p.id === initialProjectId) ?? projects[0] ?? null
+  )
   const [selectedPhase, setSelectedPhase] = useState<PhaseKey>('detail')
   const [phaseBudgets, setPhaseBudgets] = useState<Record<PhaseKey, LphBudget[]>>({ basic: [], detail: [], ausfuehrung: [] })
   const [allocations, setAllocations] = useState<AllocMap>({})
@@ -68,7 +70,10 @@ export default function ProjectPlanningView({ projects, employees }: Props) {
   const departments = [...new Set(allEmployees.map(e => e.department))]
   const phase = PLANNING_PHASES.find(p => p.key === selectedPhase)!
 
-  useEffect(() => { if (projects[0]) loadAll(projects[0]) }, []) // eslint-disable-line
+  useEffect(() => {
+    const initial = projects.find(p => p.id === initialProjectId) ?? projects[0]
+    if (initial) handleProjectSelect(initial)
+  }, [initialProjectId]) // eslint-disable-line
 
   async function loadAll(project: Project) {
     await Promise.all([loadPhaseBudgets(project), loadAllocations(project), loadScheduleData(project)])

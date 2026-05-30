@@ -15,7 +15,7 @@ const NAV_PL = [
 ]
 
 const NAV_TL = [
-  { href: '/dashboard/tl', label: 'Heatmap', icon: Flame },
+  { href: '/dashboard/tl', label: 'Cockpit', icon: Flame },
   { href: '/dashboard/pl', label: 'Projekte', icon: FolderKanban },
 ]
 
