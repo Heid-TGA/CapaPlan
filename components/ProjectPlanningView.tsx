@@ -5,8 +5,9 @@ import { TrendingDown, Users, Clock, Euro, Circle, ChevronRight, Plus, X } from 
 import { upsertAllocation, getLphBudgetStatus } from '@/app/actions/allocation'
 import { loadProjectAllocations } from '@/app/actions/heatmap'
 import { loadTerminplan, saveLphSchedule, saveMilestone, ensureLphBudgetRow, type LphSchedule, type Milestone } from '@/app/actions/terminplan'
+import { loadExternalTrades, createExternalTrade, deleteExternalTrade, type ExternalTrade } from '@/app/actions/external-trades'
 import { ALL_LPH, LPH_LABELS } from '@/lib/planning-phases'
-import { isoWeekOf } from '@/lib/calendar-weeks'
+import { isoWeekOf, mondayOfIsoWeek } from '@/lib/calendar-weeks'
 import GanttBar from './GanttBar'
 
 // ── Konstanten ─────────────────────────────────────────────────────────────────
@@ -15,6 +16,9 @@ const COL_WIDTH = 52   // px — einheitliche Spaltenbreite für Gantt + Matrix
 const EMP_COL   = 200  // px — Mitarbeiter-/LPH-Spalte
 const CAP_COL   = 56   // px — Kapazitätsspalte
 const H_I_WEEKS = 2    // Erste N KWs = H&I-Zone
+
+// Fremdgewerk-Namensvorschläge (Freitext bleibt möglich).
+const TRADE_PRESETS = ['Architektur', 'Statik', 'Bauherr', 'Behörde', 'Fachplaner']
 
 // LPH → Balkenfarbe (visuelle Gruppierung wie früher Basic/Detail/Ausführung)
 function lphColor(n: number): string {
@@ -76,6 +80,19 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const [msError, setMsError] = useState<string | null>(null)
   const [addingLph, setAddingLph] = useState<number | null>(null) // LPH ohne Budget wird gerade angelegt
 
+  // Andere Gewerke (Terminplan-/Koordinationslayer, KEIN Ressourcenlayer)
+  const [externalTrades, setExternalTrades] = useState<ExternalTrade[]>([])
+  const [showExternalTrades, setShowExternalTrades] = useState(false) // Default: eingeklappt
+  const [showEtForm, setShowEtForm] = useState(false)
+  const [etName, setEtName] = useState('')
+  const [etLph, setEtLph] = useState<number | null>(null)
+  const [etStart, setEtStart] = useState('') // ISO yyyy-mm-dd
+  const [etEnd, setEtEnd] = useState('')     // ISO yyyy-mm-dd
+  const [etNote, setEtNote] = useState('')
+  const [etSaving, setEtSaving] = useState(false)
+  const [etError, setEtError] = useState<string | null>(null)
+  const [deletingEtId, setDeletingEtId] = useState<string | null>(null)
+
   const currentWeek = getCurrentWeek()
   const currentYear = new Date().getFullYear()
   const weeks = Array.from({ length: 12 }, (_, i) => ((currentWeek - 1 + i) % 52) + 1)
@@ -131,12 +148,21 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       const sortedVisible = [...visible].sort((a, b) => a - b)
       setSelectedLph(sortedVisible[0] ?? null)
     } catch (e) { console.error(e) }
+
+    // Andere Gewerke separat laden — ein Fehler hier darf die Projektplanung
+    // (Budgets/Allocations/Terminplan) NICHT blockieren.
+    try {
+      const etRes = await loadExternalTrades(project.id)
+      if (etRes.success) setExternalTrades(etRes.data)
+      else { setExternalTrades([]); console.error('loadExternalTrades:', etRes.message) }
+    } catch (e) { setExternalTrades([]); console.error(e) }
   }
 
   async function handleProjectSelect(project: Project) {
     setSelectedProject(project)
     setLphBudgets({}); setAllocations({}); setSchedules([]); setMilestones([])
     setVisibleLph(new Set()); setSelectedLph(null); setShowLphPicker(false)
+    setExternalTrades([]); setShowEtForm(false); setEtError(null)
     await loadAll(project)
   }
 
@@ -251,6 +277,88 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       setMsError(e instanceof Error ? e.message : 'Speichern fehlgeschlagen')
     } finally {
       setMsSaving(false)
+    }
+  }
+
+  // ── Andere Gewerke (Terminplan-/Koordinationslayer) ────────────────────────────
+
+  // Read-only Balkenposition auf der sichtbaren 12-KW-Achse. Datum → ISO-KW über
+  // lib/calendar-weeks. Balken wird auf das Fenster geclippt; liegt er komplett
+  // außerhalb, wird null zurückgegeben (nicht gerendert).
+  function externalBarPos(t: ExternalTrade): { left: number; width: number } | null {
+    const sd = new Date(`${t.start_date}T00:00:00Z`)
+    const ed = new Date(`${t.end_date}T00:00:00Z`)
+    if (Number.isNaN(sd.getTime()) || Number.isNaN(ed.getTime())) return null
+    const m0 = mondayOfIsoWeek(currentYear, currentWeek)
+    const sRef = isoWeekOf(sd)
+    const eRef = isoWeekOf(ed)
+    const mS = mondayOfIsoWeek(sRef.year, sRef.week)
+    const mE = mondayOfIsoWeek(eRef.year, eRef.week)
+    const sDelta = Math.round((mS.getTime() - m0.getTime()) / (7 * 86_400_000))
+    const eDelta = Math.round((mE.getTime() - m0.getTime()) / (7 * 86_400_000))
+    const from = Math.max(0, sDelta)
+    const to = Math.min(weeks.length - 1, eDelta)
+    if (to < from) return null // komplett außerhalb des Fensters
+    return { left: from * COL_WIDTH, width: (to - from + 1) * COL_WIDTH }
+  }
+
+  // Tooltip: "Gewerk · LPH x · dd.mm.yyyy–dd.mm.yyyy" (+ Notiz falls vorhanden).
+  function externalTooltip(t: ExternalTrade): string {
+    const s = formatMsDate(t.start_date) ?? t.start_date
+    const e = formatMsDate(t.end_date) ?? t.end_date
+    const base = `${t.trade_name} · LPH ${t.lph_number} · ${s}–${e}`
+    return t.note ? `${base} · ${t.note}` : base
+  }
+
+  function openEtForm() {
+    setEtName('')
+    setEtLph(activeLph ?? 1)
+    setEtStart('')
+    setEtEnd('')
+    setEtNote('')
+    setEtError(null)
+    setShowEtForm(true)
+  }
+
+  async function handleSaveExternalTrade() {
+    if (!selectedProject) return
+    const name = etName.trim()
+    if (!name) { setEtError('Gewerkname fehlt'); return }
+    if (etLph == null) { setEtError('Leistungsphase wählen'); return }
+    if (!etStart) { setEtError('Startdatum fehlt'); return }
+    if (!etEnd) { setEtError('Enddatum fehlt'); return }
+    if (etEnd < etStart) { setEtError('Enddatum darf nicht vor Startdatum liegen'); return }
+    setEtSaving(true); setEtError(null)
+    try {
+      const res = await createExternalTrade(selectedProject.id, {
+        trade_name: name,
+        lph_number: etLph,
+        start_date: etStart,
+        end_date: etEnd,
+        note: etNote.trim() || undefined,
+      })
+      if (!res.success) { setEtError(res.message || 'Speichern fehlgeschlagen'); return }
+      setExternalTrades(prev => [...prev, res.data])
+      setShowExternalTrades(true)
+      setShowEtForm(false)
+    } catch (e) {
+      setEtError(e instanceof Error ? e.message : 'Speichern fehlgeschlagen')
+    } finally {
+      setEtSaving(false)
+    }
+  }
+
+  async function handleDeleteExternalTrade(id: string) {
+    if (deletingEtId) return
+    setDeletingEtId(id)
+    try {
+      const res = await deleteExternalTrade(id)
+      if (res.success) setExternalTrades(prev => prev.filter(t => t.id !== id))
+      else console.error('deleteExternalTrade:', res.message)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setDeletingEtId(null)
     }
   }
 
@@ -510,6 +618,122 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                 </div>
               )
             })}
+
+            {/* ── ANDERE GEWERKE (Terminplan-/Koordinationslayer, read-only) ── */}
+            <div className="border-b border-slate-100">
+              {/* Gruppenzeile */}
+              <div className="flex items-center justify-between bg-slate-50/60 px-5 py-1.5"
+                style={{ width: EMP_COL + CAP_COL + weeks.length * COL_WIDTH }}>
+                <button onClick={() => setShowExternalTrades(v => !v)}
+                  className="flex items-center gap-1.5 group">
+                  <ChevronRight className={`h-3.5 w-3.5 text-slate-400 transition-transform ${showExternalTrades ? 'rotate-90' : ''}`} />
+                  <span className="text-xs font-semibold text-slate-600 group-hover:text-slate-800">Andere Gewerke</span>
+                  <span className="text-[10px] text-slate-400 font-medium">{externalTrades.length}</span>
+                </button>
+                <div className="relative">
+                  <button onClick={() => (showEtForm ? setShowEtForm(false) : openEtForm())}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-slate-600 text-[11px] font-medium hover:bg-slate-50 transition-colors">
+                    <Plus className="h-3 w-3" />Gewerk
+                  </button>
+                  {showEtForm && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setShowEtForm(false)} />
+                      <div className="absolute right-0 top-full mt-2 z-50 w-72 bg-white rounded-xl border border-slate-200 shadow-xl p-3">
+                        <p className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-widest text-slate-400">Fremdgewerk hinzufügen</p>
+                        <div className="space-y-2.5 px-1">
+                          <div>
+                            <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Gewerk</label>
+                            <input type="text" value={etName} onChange={e => setEtName(e.target.value)} placeholder="z. B. Architektur"
+                              className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-slate-800" />
+                            <div className="flex flex-wrap gap-1 mt-1.5">
+                              {TRADE_PRESETS.map(p => (
+                                <button key={p} type="button" onClick={() => setEtName(p)}
+                                  className="px-2 py-0.5 rounded-full border border-slate-200 text-[10px] text-slate-500 hover:bg-slate-50">
+                                  {p}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Leistungsphase</label>
+                            <select value={etLph ?? ''} onChange={e => setEtLph(Number(e.target.value))}
+                              className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-slate-800 bg-white">
+                              {ALL_LPH.map(n => (
+                                <option key={n} value={n}>LPH {n}: {LPH_LABELS[n]}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="flex gap-2">
+                            <div className="flex-1">
+                              <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Start</label>
+                              <input type="date" value={etStart} onChange={e => setEtStart(e.target.value)}
+                                className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-slate-800" />
+                            </div>
+                            <div className="flex-1">
+                              <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Ende</label>
+                              <input type="date" value={etEnd} onChange={e => setEtEnd(e.target.value)}
+                                className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-slate-800" />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Notiz (optional)</label>
+                            <input type="text" value={etNote} onChange={e => setEtNote(e.target.value)} placeholder="optional"
+                              className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-slate-800" />
+                          </div>
+                          {etError && <p className="text-[11px] text-red-500">{etError}</p>}
+                          <button onClick={handleSaveExternalTrade} disabled={etSaving}
+                            className="w-full py-1.5 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 transition-colors disabled:opacity-50">
+                            {etSaving ? 'Speichern…' : 'Gewerk speichern'}
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Fremdgewerk-Zeilen (aufgeklappt) */}
+              {showExternalTrades && (
+                externalTrades.length === 0 ? (
+                  <div className="px-5 py-3 text-center text-[11px] text-slate-400">
+                    Noch keine anderen Gewerke — über „+ Gewerk" hinzufügen.
+                  </div>
+                ) : externalTrades.map(t => {
+                  const pos = externalBarPos(t)
+                  return (
+                    <div key={t.id} className="flex items-center border-t border-slate-50 hover:bg-slate-50/30">
+                      {/* Label: Name + LPH-Badge + Löschen */}
+                      <div style={{ width: EMP_COL, minWidth: EMP_COL }} className="px-5 py-1.5 flex items-center gap-2 border-r border-slate-100">
+                        <span className="text-xs font-medium text-slate-600 truncate">{t.trade_name}</span>
+                        <span className="ml-auto shrink-0 px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-500 text-[9px] font-semibold">LPH {t.lph_number}</span>
+                        <button onClick={() => handleDeleteExternalTrade(t.id)} disabled={deletingEtId === t.id}
+                          title="Gewerk löschen"
+                          className="shrink-0 text-slate-300 hover:text-red-500 transition-colors disabled:opacity-40">
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                      <div style={{ width: CAP_COL, minWidth: CAP_COL }} className="border-r border-slate-100" />
+                      {/* Read-only Balken auf der KW-Achse */}
+                      <div className="flex-1 relative py-2">
+                        <div className="absolute inset-0 flex pointer-events-none">
+                          {weeks.map((_, i) => (
+                            <div key={i} style={{ width: COL_WIDTH, minWidth: COL_WIDTH }}
+                              className={i < H_I_WEEKS ? 'bg-blue-50/40' : ''} />
+                          ))}
+                        </div>
+                        {pos && (
+                          <div style={{ left: pos.left, width: pos.width }}
+                            title={externalTooltip(t)}
+                            className="absolute top-1/2 -translate-y-1/2 h-4 rounded-md border border-dashed border-slate-400 bg-slate-200/60 flex items-center overflow-hidden cursor-help">
+                            <span className="px-2 text-[10px] text-slate-500 truncate">{t.trade_name}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
 
             {/* ── KW-HEADER ── */}
             <div className="flex bg-slate-50 border-b border-slate-200">
