@@ -19,6 +19,8 @@ export interface Milestone {
   year: number
   type: 'external' | 'internal'
   description: string
+  // Exaktes Datum (ISO yyyy-mm-dd) zusaetzlich zu kw/year. NULL bei Alt-Daten.
+  milestone_date: string | null
 }
 
 // Alle LPH-Termine + Meilensteine für ein Projekt laden
@@ -38,7 +40,7 @@ export async function loadTerminplan(projectId: string): Promise<{
 
   const { data: msData, error: msError } = await supabase
     .from('milestones')
-    .select('id, lph_id, kw, year, type, description, project_lph_budgets(lph_number)')
+    .select('id, lph_id, kw, year, type, description, milestone_date, project_lph_budgets(lph_number)')
     .eq('project_id', projectId)
     .order('kw')
 
@@ -64,6 +66,7 @@ export async function loadTerminplan(projectId: string): Promise<{
       year: m.year,
       type: m.type as 'external' | 'internal',
       description: m.description,
+      milestone_date: m.milestone_date ?? null,
     }
   })
 
@@ -89,19 +92,31 @@ export async function saveLphSchedule(
 }
 
 // Meilenstein upserten
+// milestoneDate ist optional (ISO yyyy-mm-dd). Wird er weggelassen oder ist leer,
+// bleibt das DB-Feld milestone_date NULL — bestehende Aufrufe ohne Datum bleiben
+// damit kompatibel. kw/year werden weiterhin gespeichert (KW-basierte Anzeige).
 export async function saveMilestone(
   projectId: string,
   lphId: string,
   kw: number,
   year: number,
   type: 'external' | 'internal',
-  description: string
+  description: string,
+  milestoneDate?: string | null
 ): Promise<{ success: boolean; id: string | null; message: string }> {
   const supabase = await createClient()
 
   const { data, error } = await supabase
     .from('milestones')
-    .insert({ project_id: projectId, lph_id: lphId, kw, year, type, description })
+    .insert({
+      project_id: projectId,
+      lph_id: lphId,
+      kw,
+      year,
+      type,
+      description,
+      milestone_date: milestoneDate || null,
+    })
     .select('id')
     .single()
 

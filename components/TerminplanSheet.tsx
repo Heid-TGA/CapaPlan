@@ -109,6 +109,7 @@ export default function TerminplanSheet({ projectId, projectName, onClose, onSav
         id: result.id, lph_id: newMs.lphId, lph_number: lphNum,
         kw: parseInt(newMs.kw), year: currentYear,
         type: newMs.type, description: newMs.description,
+        milestone_date: null, // KW-basierter Pfad ohne Datumsfeld
       }
       const updated = [...milestones, ms]
       setMilestones(updated)

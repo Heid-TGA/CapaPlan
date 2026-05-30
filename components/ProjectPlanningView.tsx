@@ -197,8 +197,20 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   function isInRange(kw: number): boolean {
     return !!(activeSchedule?.start_kw && activeSchedule?.end_kw && kw >= activeSchedule.start_kw && kw <= activeSchedule.end_kw)
   }
+  // ISO yyyy-mm-dd → dd.mm.yyyy. NULL/leer/ungültig → null (Tooltip fällt dann
+  // auf reine KW-Anzeige zurück, z. B. für Alt-Meilensteine ohne milestone_date).
+  function formatMsDate(iso: string | null): string | null {
+    if (!iso) return null
+    const [y, m, d] = iso.split('-')
+    if (!y || !m || !d) return null
+    return `${d}.${m}.${y}`
+  }
   function msTooltip(m: Milestone): string {
-    return `${m.description} · KW ${String(m.kw).padStart(2, '0')}/${m.year}`
+    const kwPart = `KW ${String(m.kw).padStart(2, '0')}/${m.year}`
+    const datePart = formatMsDate(m.milestone_date)
+    return datePart
+      ? `${m.description} · ${datePart} · ${kwPart}`
+      : `${m.description} · ${kwPart}`
   }
 
   // ── Meilenstein-MVP ──────────────────────────────────────────────────────────
@@ -226,11 +238,13 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     if (!sched) { setMsError('LPH ohne Budget'); return }   // nur LPH mit vorhandener lph_id
     setMsSaving(true); setMsError(null)
     try {
-      const res = await saveMilestone(selectedProject.id, sched.lph_id, kw, year, 'external', desc)
+      // msDate (ISO yyyy-mm-dd) wird zusätzlich als exaktes Datum gespeichert;
+      // kw/year bleiben für die KW-basierte Anzeige erhalten.
+      const res = await saveMilestone(selectedProject.id, sched.lph_id, kw, year, 'external', desc, msDate)
       if (!res.success || !res.id) { setMsError(res.message || 'Speichern fehlgeschlagen'); return }
       setMilestones(prev => [...prev, {
         id: res.id!, lph_id: sched.lph_id, lph_number: sched.lph_number,
-        kw, year, type: 'external', description: desc,
+        kw, year, type: 'external', description: desc, milestone_date: msDate,
       }])
       setShowMsForm(false)
     } catch (e) {
