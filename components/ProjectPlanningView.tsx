@@ -6,6 +6,7 @@ import { upsertAllocation, getLphBudgetStatus } from '@/app/actions/allocation'
 import { loadProjectAllocations } from '@/app/actions/heatmap'
 import { loadTerminplan, saveLphSchedule, saveMilestone, type LphSchedule, type Milestone } from '@/app/actions/terminplan'
 import { ALL_LPH, LPH_LABELS } from '@/lib/planning-phases'
+import { isoWeekOf } from '@/lib/calendar-weeks'
 import GanttBar from './GanttBar'
 
 // ── Konstanten ─────────────────────────────────────────────────────────────────
@@ -69,8 +70,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // Meilenstein-Formular (MVP, KW-basiert)
   const [showMsForm, setShowMsForm] = useState(false)
   const [msDesc, setMsDesc] = useState('')
-  const [msKw, setMsKw] = useState('')
-  const [msYear, setMsYear] = useState('')
+  const [msDate, setMsDate] = useState('') // ISO-Datum (yyyy-mm-dd) aus <input type="date">
   const [msLph, setMsLph] = useState<number | null>(null)
   const [msSaving, setMsSaving] = useState(false)
   const [msError, setMsError] = useState<string | null>(null)
@@ -180,8 +180,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   function openMsForm() {
     const sorted = [...schedules].sort((a, b) => a.lph_number - b.lph_number)
     setMsDesc('')
-    setMsKw(String(currentWeek))
-    setMsYear(String(currentYear))
+    setMsDate('')
     setMsLph(activeLph != null && availableLph.has(activeLph) ? activeLph : (sorted[0]?.lph_number ?? null))
     setMsError(null)
     setShowMsForm(true)
@@ -190,11 +189,13 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   async function handleSaveMilestone() {
     if (!selectedProject || msLph == null) return
     const desc = msDesc.trim()
-    const kw = parseInt(msKw, 10)
-    const year = parseInt(msYear, 10)
     if (!desc) { setMsError('Beschreibung fehlt'); return }
-    if (!(kw >= 1 && kw <= 53)) { setMsError('KW muss 1–53 sein'); return }
-    if (!(year >= 2024 && year <= 2099)) { setMsError('Jahr ungültig'); return }
+    if (!msDate) { setMsError('Datum fehlt'); return }
+    // Datum als UTC-Mitternacht parsen (Zeitzonen-Drift vermeiden),
+    // dann über die zentrale Funktion in ISO-KW + ISO-Jahr umrechnen.
+    const parsed = new Date(`${msDate}T00:00:00Z`)
+    if (Number.isNaN(parsed.getTime())) { setMsError('Datum ungültig'); return }
+    const { year, week: kw } = isoWeekOf(parsed) // ISO-Jahr, NICHT getFullYear()
     const sched = schedules.find(s => s.lph_number === msLph)
     if (!sched) { setMsError('LPH ohne Budget'); return }   // nur LPH mit vorhandener lph_id
     setMsSaving(true); setMsError(null)
@@ -363,17 +364,11 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                           <input type="text" value={msDesc} onChange={e => setMsDesc(e.target.value)} placeholder="z. B. Bauantrag"
                             className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-slate-800" />
                         </div>
-                        <div className="flex gap-2">
-                          <div className="flex-1">
-                            <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">KW</label>
-                            <input type="number" min="1" max="53" value={msKw} onChange={e => setMsKw(e.target.value)}
-                              className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-center text-slate-800" />
-                          </div>
-                          <div className="flex-1">
-                            <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Jahr</label>
-                            <input type="number" min="2024" max="2099" value={msYear} onChange={e => setMsYear(e.target.value)}
-                              className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-center text-slate-800" />
-                          </div>
+                        <div>
+                          <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Datum</label>
+                          <input type="date" value={msDate} onChange={e => setMsDate(e.target.value)}
+                            className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-slate-800" />
+                          <p className="mt-1 text-[10px] text-slate-400">Wird in ISO-Kalenderwoche umgerechnet.</p>
                         </div>
                         <div>
                           <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Leistungsphase</label>
