@@ -4,7 +4,7 @@ import { useState, useTransition, useEffect, useRef } from 'react'
 import { TrendingDown, Users, Clock, Euro, Circle, ChevronRight, Plus, X } from 'lucide-react'
 import { upsertAllocation, getLphBudgetStatus } from '@/app/actions/allocation'
 import { loadProjectAllocations } from '@/app/actions/heatmap'
-import { loadTerminplan, saveLphSchedule, saveMilestone, type LphSchedule, type Milestone } from '@/app/actions/terminplan'
+import { loadTerminplan, saveLphSchedule, saveMilestone, ensureLphBudgetRow, type LphSchedule, type Milestone } from '@/app/actions/terminplan'
 import { ALL_LPH, LPH_LABELS } from '@/lib/planning-phases'
 import { isoWeekOf } from '@/lib/calendar-weeks'
 import GanttBar from './GanttBar'
@@ -74,6 +74,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const [msLph, setMsLph] = useState<number | null>(null)
   const [msSaving, setMsSaving] = useState(false)
   const [msError, setMsError] = useState<string | null>(null)
+  const [addingLph, setAddingLph] = useState<number | null>(null) // LPH ohne Budget wird gerade angelegt
 
   const currentWeek = getCurrentWeek()
   const currentYear = new Date().getFullYear()
@@ -154,13 +155,41 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const activeSchedule = activeLph != null ? schedules.find(s => s.lph_number === activeLph) ?? null : null
   const primaryLphId = activeLph != null ? `${selectedProject?.id}_lph${activeLph}` : ''
 
-  function toggleLph(n: number) {
-    if (!availableLph.has(n)) return
-    setVisibleLph(prev => {
-      const next = new Set(prev)
-      if (next.has(n)) next.delete(n); else next.add(n)
-      return next
-    })
+  async function toggleLph(n: number) {
+    // Abwählen: nur aus der sichtbaren Liste nehmen — KEINE DB-Zeile / Allocations /
+    // Meilensteine / Terminbalken löschen.
+    if (visibleLph.has(n)) {
+      setVisibleLph(prev => { const next = new Set(prev); next.delete(n); return next })
+      return
+    }
+    // Bereits budgetiert (echte lph_id vorhanden): nur einblenden, keine neue DB-Zeile.
+    if (availableLph.has(n)) {
+      setVisibleLph(prev => new Set(prev).add(n))
+      setSelectedLph(n)
+      return
+    }
+    // LPH ohne Budget: idempotent eine 0-Euro-Zeile anlegen, dann einblenden.
+    if (!selectedProject || addingLph != null) return
+    setAddingLph(n)
+    try {
+      const res = await ensureLphBudgetRow(selectedProject.id, n)
+      if (!res.success || !res.row) { console.error('ensureLphBudgetRow:', res.message); return }
+      const row = res.row
+      setSchedules(prev => prev.some(s => s.lph_number === row.lph_number)
+        ? prev.map(s => (s.lph_number === row.lph_number ? row : s))
+        : [...prev, row])
+      setVisibleLph(prev => new Set(prev).add(n))
+      setSelectedLph(n)
+      // Budgetstatus nachladen (für „Verplante Stunden" / spätere Allocations).
+      try {
+        const b = await getLphBudgetStatus(selectedProject.id, n)
+        if (b) setLphBudgets(prev => ({ ...prev, [n]: b }))
+      } catch { /* 0-Euro-LPH: Budgetkarte greift auf totalBudget>0-Guard zurück */ }
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setAddingLph(null)
+    }
   }
 
   // ── Terminplan-/Range-Helpers (auf aktive LPH bezogen) ─────────────────────────
@@ -327,14 +356,17 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                     {ALL_LPH.map(n => {
                       const available = availableLph.has(n)
                       const checked = visibleLph.has(n)
+                      const busy = addingLph === n
                       return (
                         <label key={n}
-                          className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-sm ${available ? 'cursor-pointer hover:bg-slate-50' : 'cursor-not-allowed opacity-50'}`}>
-                          <input type="checkbox" disabled={!available} checked={checked} onChange={() => toggleLph(n)}
+                          className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-sm ${busy ? 'cursor-wait opacity-60' : 'cursor-pointer hover:bg-slate-50'}`}>
+                          <input type="checkbox" disabled={busy} checked={checked} onChange={() => toggleLph(n)}
                             className="h-3.5 w-3.5 rounded border-slate-300 accent-slate-800" />
                           <span className="font-semibold text-slate-700 shrink-0">LPH {n}</span>
                           <span className="text-xs text-slate-400 truncate">{LPH_LABELS[n]}</span>
-                          {!available && <span className="ml-auto text-[9px] text-slate-300 shrink-0">kein Budget</span>}
+                          {busy
+                            ? <span className="ml-auto text-[9px] text-slate-400 shrink-0">anlegen…</span>
+                            : !available && <span className="ml-auto text-[9px] text-amber-500 shrink-0">kein Budget</span>}
                         </label>
                       )
                     })}
@@ -436,7 +468,6 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                       colWidth={COL_WIDTH}
                       startKw={s.start_kw}
                       endKw={s.end_kw}
-                      milestones={milestones.filter(m => m.lph_id === s.lph_id)}
                       color={color}
                       onChange={(id, start, end) => {
                         setSchedules(prev => prev.map(sc =>
@@ -446,6 +477,24 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                       }}
                       onSave={(id, start, end) => saveLphSchedule(id, start, end, currentYear)}
                     />
+                    {/* Meilenstein-Marker dieser LPH-Zeile: rotes X an der jeweiligen KW,
+                        unabhängig vom Terminbalken (auch ohne Balken sichtbar). */}
+                    <div className="absolute inset-0 pointer-events-none">
+                      {milestones.filter(m => m.lph_id === s.lph_id).map(m => {
+                        const idx = weeks.indexOf(m.kw)
+                        if (idx < 0) return null
+                        return (
+                          <div key={m.id} style={{ left: idx * COL_WIDTH, width: COL_WIDTH }}
+                            className="absolute top-0 bottom-0 flex items-center justify-center">
+                            <span title={msTooltip(m)} className="pointer-events-auto cursor-help">
+                              {m.type === 'external'
+                                ? <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-white ring-1 ring-red-200 shadow-sm"><X className="h-2.5 w-2.5 text-red-600" strokeWidth={3} /></span>
+                                : <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-white ring-1 ring-blue-200 shadow-sm"><Circle className="h-2 w-2 text-blue-500 fill-blue-500" /></span>}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
                   </div>
                 </div>
               )

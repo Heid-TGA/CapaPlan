@@ -1,8 +1,7 @@
 'use client'
 
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { X, Circle, GripVertical } from 'lucide-react'
-import type { Milestone } from '@/app/actions/terminplan'
+import { GripVertical } from 'lucide-react'
 
 interface GanttBarProps {
   lphId: string
@@ -11,7 +10,6 @@ interface GanttBarProps {
   colWidth: number
   startKw: number | null
   endKw: number | null
-  milestones: Milestone[]
   color: string
   onChange: (lphId: string, startKw: number, endKw: number) => void
   onSave: (lphId: string, startKw: number, endKw: number) => void
@@ -78,7 +76,7 @@ function BarPopover({
 
 export default function GanttBar({
   lphId, lphNumber, weeks, colWidth, startKw, endKw,
-  milestones, color, onChange, onSave,
+  color, onChange, onSave,
 }: GanttBarProps) {
   const [showPopover, setShowPopover] = useState(false)
   const [hovered, setHovered] = useState(false)
@@ -196,7 +194,6 @@ export default function GanttBar({
   const si = kwToIdx(startKw)
   const ei = kwToIdx(endKw)
   const barCols = Math.max(1, ei - si + 1)
-  const lphMs = milestones.filter(m => m.kw >= startKw && m.kw <= endKw)
 
   return (
     <div className="relative flex items-center" style={{ height: 28 }}>
@@ -229,21 +226,6 @@ export default function GanttBar({
           <span className="absolute inset-x-4 text-[9px] font-bold text-white truncate text-center pointer-events-none leading-none">
             LPH {lphNumber}
           </span>
-
-          {/* Meilensteine */}
-          {lphMs.map(m => {
-            const mi = kwToIdx(m.kw) - si
-            const pct = barCols > 1 ? (mi / (barCols-1)) * 100 : 50
-            return (
-              <div key={m.id} className="absolute inset-y-0 flex items-end pb-0.5 pointer-events-none"
-                style={{ left: `${pct}%`, transform: 'translateX(-50%)' }}
-                title={`${m.description} · KW ${String(m.kw).padStart(2, '0')}/${m.year}`}>
-                {m.type === 'external'
-                  ? <span className="flex h-3 w-3 items-center justify-center rounded-full bg-white"><X className="h-2.5 w-2.5 text-red-600" strokeWidth={3} /></span>
-                  : <Circle className="h-2.5 w-2.5 text-white/70 fill-white/70" />}
-              </div>
-            )
-          })}
 
           {/* Resize R */}
           <div onPointerDown={onResizeRightDown}

@@ -123,3 +123,68 @@ export async function deleteMilestone(
   if (error) return { success: false, message: error.message }
   return { success: true, message: 'Gelöscht' }
 }
+
+// LPH-Budgetzeile sicherstellen (idempotent).
+// Erlaubt das Hinzufügen einer LPH OHNE Budget im Terminplan: legt bei Bedarf eine
+// Zeile mit budget_eur = 0 an, damit die LPH eine echte lph_id bekommt (Terminbalken,
+// Meilensteine). Eine bereits vorhandene Zeile wird NICHT überschrieben — weder Budget
+// noch start_kw/end_kw/plan_year. plan_year nutzt beim Anlegen den DB-Default (2026).
+// Abacus kann diese 0-Euro-Zeile später via upsert(onConflict: project_id,lph_number)
+// mit echtem budget_eur aktualisieren, ohne die Terminplanfelder zu verlieren.
+export async function ensureLphBudgetRow(
+  projectId: string,
+  lphNumber: number
+): Promise<{ success: boolean; message: string; row: LphSchedule | null }> {
+  if (!Number.isInteger(lphNumber) || lphNumber < 1 || lphNumber > 9) {
+    return { success: false, message: 'lph_number muss zwischen 1 und 9 liegen', row: null }
+  }
+
+  const supabase = await createClient()
+
+  // 1. Bereits vorhanden? Dann unverändert zurückgeben (nichts überschreiben).
+  const { data: existing, error: selError } = await supabase
+    .from('project_lph_budgets')
+    .select('id, lph_number, budget_eur, start_kw, end_kw, plan_year')
+    .eq('project_id', projectId)
+    .eq('lph_number', lphNumber)
+    .maybeSingle()
+
+  if (selError) return { success: false, message: selError.message, row: null }
+
+  if (existing) {
+    return {
+      success: true,
+      message: 'Bereits vorhanden',
+      row: {
+        lph_id: existing.id,
+        lph_number: existing.lph_number,
+        budget_eur: existing.budget_eur,
+        start_kw: existing.start_kw,
+        end_kw: existing.end_kw,
+        plan_year: existing.plan_year ?? 2026,
+      },
+    }
+  }
+
+  // 2. Nicht vorhanden → neue 0-Euro-Zeile. start_kw/end_kw bleiben NULL (noch kein Balken).
+  const { data: created, error: insError } = await supabase
+    .from('project_lph_budgets')
+    .insert({ project_id: projectId, lph_number: lphNumber, budget_eur: 0 })
+    .select('id, lph_number, budget_eur, start_kw, end_kw, plan_year')
+    .single()
+
+  if (insError) return { success: false, message: insError.message, row: null }
+
+  return {
+    success: true,
+    message: 'Angelegt',
+    row: {
+      lph_id: created.id,
+      lph_number: created.lph_number,
+      budget_eur: created.budget_eur,
+      start_kw: created.start_kw,
+      end_kw: created.end_kw,
+      plan_year: created.plan_year ?? 2026,
+    },
+  }
+}
