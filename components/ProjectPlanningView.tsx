@@ -21,12 +21,14 @@ import {
   loadProjectAgBudgets, saveProjectAgBudgets, deriveAgBudgetsFromHoaiScenario,
   type AgBudget, type BudgetSourceType,
 } from '@/app/actions/project-budget-source'
-import { loadHoaiScenarios, type HoaiScenario } from '@/app/actions/hoai-scenarios'
+import { loadHoaiScenarios, loadHoaiScenarioDetail, type HoaiScenario, type HoaiScenarioDetail } from '@/app/actions/hoai-scenarios'
 import { calcHoaiDummy, HOAI_DUMMY_LPH_SPLIT } from '@/lib/hoai-dummy'
 import {
   ANLAGENGRUPPEN, GEWERK_GROUPS, AG_NUMBERS, gewerkBudgetsFromAg,
-  HOAI_DUMMY_AG_SPLIT_SUM,
+  HOAI_DUMMY_AG_SPLIT_SUM, type Gewerk,
 } from '@/lib/anlagengruppen'
+// 10.4: AG-/LPH-Detailszenarien -> Gewerk-/LPH-Budgetmatrix (Terminplan-Kopplung).
+import { gewerkLphBudgetsFromConfigs, HOAI_AG_LPH_NUMBERS } from '@/lib/hoai-ag'
 
 // ── Konstanten ─────────────────────────────────────────────────────────────────
 
@@ -152,6 +154,11 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
   // 10.1: AG-Budgets (AG 1–5) je Projekt (project_ag_budgets), per ag_number.
   const [agBudgets, setAgBudgets] = useState<Record<number, AgBudget>>({})
+
+  // 10.4: Detail des aktiven HOAI-Szenarios (AG-/LPH-Konfiguration). Nur geladen,
+  // wenn Budgetquelle='hoai' und ein Szenario gewählt ist. Liefert die effektive
+  // Planungsbasis je Gewerk+LPH für den Terminplan (überschreibt project_lph_budgets NICHT).
+  const [hoaiDetail, setHoaiDetail] = useState<HoaiScenarioDetail | null>(null)
 
   // 10.1: Manuelle AG-Budgeteingabe (Modal).
   const [showManual, setShowManual] = useState(false)
@@ -297,7 +304,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     setExternalTrades([]); setShowEtForm(false); setEtError(null)
     setScheduleError(null)
     // 10.1: Budgetquelle/AG-Budgets zuruecksetzen (werden in loadAll neu geladen).
-    setBudgetSource('abacus'); setHoaiScenarioId(null); setAgBudgets({})
+    setBudgetSource('abacus'); setHoaiScenarioId(null); setAgBudgets({}); setHoaiDetail(null)
     setShowManual(false); setShowHoaiPicker(false); setShowHoai(false)
     setBudgetSourceError(null); setManualError(null)
     await loadAll(project)
@@ -438,6 +445,18 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       .catch(() => { if (!cancelled) setRolePlanDefaults([]) })
     return () => { cancelled = true }
   }, [])
+
+  // 10.4: Detail des aktiven HOAI-Szenarios laden — nur bei Budgetquelle 'hoai'
+  // mit gewähltem Szenario. Daraus wird die effektive Gewerk-/LPH-Planungsbasis
+  // für den Terminplan abgeleitet. Fehler hier blockieren die Planung nicht.
+  useEffect(() => {
+    let cancelled = false
+    if (budgetSource !== 'hoai' || !hoaiScenarioId) { setHoaiDetail(null); return }
+    loadHoaiScenarioDetail(hoaiScenarioId)
+      .then(res => { if (!cancelled) setHoaiDetail(res.success && res.data ? res.data : null) })
+      .catch(() => { if (!cancelled) setHoaiDetail(null) })
+    return () => { cancelled = true }
+  }, [budgetSource, hoaiScenarioId, selectedProject?.id])
 
   // Vorhandene Verteilung der aktiven LPH-Zeile laden (immer area_id=null —
   // die Zeile selbst trägt bereits den Bereich, kein zweiter Bereichsfilter).
@@ -758,6 +777,40 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // Live-Summe der manuellen Eingaben (Anzeige im Manual-Modal).
   const manualSum = AG_NUMBERS.reduce((s, ag) => s + parseEurInput(manualInputs[ag]), 0)
 
+  // ── 10.4: HOAI-Gewerk-/LPH-Budgetmatrix (effektive Planungsbasis) ───────────
+  // Nur aktiv, wenn Budgetquelle='hoai' und ein AG-Detailszenario geladen ist:
+  //   HLKS LPH n = Σ ausgewählte LPH-n-Honorare aus AG 1–3
+  //   Elektro LPH n = Σ ausgewählte LPH-n-Honorare aus AG 4–5
+  // Diese Werte sind die EFFEKTIVE Sollbasis im Terminplan; project_lph_budgets
+  // wird NICHT verändert (nur in-memory als Planungsbasis genutzt).
+  // Nur AG-Detailszenarien (mode='ag') liefern eine echte Gewerk-/LPH-Matrix.
+  // Alt-Szenarien (mode='simple') -> null: dann gilt weiter die Abacus-/Dummy-Logik.
+  const hoaiLphBudget: Record<Gewerk, Record<number, number>> | null =
+    budgetSource === 'hoai' && hoaiDetail && hoaiDetail.mode === 'ag'
+      ? gewerkLphBudgetsFromConfigs(hoaiDetail.ags)
+      : null
+
+  // Gewerk einer LPH-Zeile (über die Bereichszuordnung HLKS/Elektro). null = Alt-/
+  // bereichslose Zeile oder Bereiche fehlen.
+  function gewerkOfSchedule(s: LphSchedule): Gewerk | null {
+    if (hlksArea && s.area_id === hlksArea.id) return 'HLKS'
+    if (elektroArea && s.area_id === elektroArea.id) return 'Elektro'
+    return null
+  }
+
+  // Effektives LPH-Sollbudget einer Zeile: bei aktiver HOAI-Quelle die aus dem
+  // Szenario abgeleitete Gewerk-/LPH-Basis (LPH 1–7), sonst das zentrale
+  // Abacus-/Projekt-LPH-Budget. Greift NICHT in project_lph_budgets ein.
+  function effectiveLphBudgetEur(s: LphSchedule): number {
+    if (hoaiLphBudget) {
+      const g = gewerkOfSchedule(s)
+      if (g && s.lph_number >= 1 && s.lph_number <= 7) {
+        return hoaiLphBudget[g][s.lph_number] ?? 0
+      }
+    }
+    return lphBudgets[s.lph_id]?.budget_eur ?? s.budget_eur ?? 0
+  }
+
   // Budgetquelle persistieren (Upsert). Setzt den lokalen State aus der Antwort.
   async function persistBudgetSource(src: BudgetSourceType, scenarioId: string | null) {
     if (!selectedProject) return
@@ -896,8 +949,9 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // Budgetstatus dieser konkreten LPH-Zeile.
   const sollByLph: Record<string, number> = {}
   for (const s of schedules) {
-    // 9-KorrA: Budget wieder aus dem zentralen Abacus-/Projekt-LPH-Budget.
-    const budget = lphBudgets[s.lph_id]?.budget_eur ?? s.budget_eur ?? 0
+    // 9-KorrA: Budget aus dem zentralen Abacus-/Projekt-LPH-Budget.
+    // 10.4: Bei aktiver HOAI-Quelle die effektive Gewerk-/LPH-Basis (project_lph_budgets bleibt unberührt).
+    const budget = effectiveLphBudgetEur(s)
     if (budget <= 0) continue
     let soll = 0
     const own = rolePlans.filter(r => r.lph_id === s.lph_id && r.area_id === null && r.share_pct > 0)
@@ -966,9 +1020,25 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     }
     return { hours, hasDistribution }
   }
+  // 10.4: Sollstunden aus einer Gewerk-/LPH-Budgetmatrix (HOAI). Je LPH 1–7 das
+  // bereits abgeleitete LPH-Budget über die Rollenverteilung in Stunden umrechnen.
+  function gewerkSollHoursFromLphMap(lphMap: Record<number, number>): { hours: number; hasDistribution: boolean } {
+    let hours = 0
+    let hasDistribution = false
+    for (const lph of HOAI_AG_LPH_NUMBERS) {
+      const lphBudget = lphMap[lph] ?? 0
+      if (lphBudget <= 0) continue
+      for (const s of roleSharesByLph.get(lph) ?? []) {
+        if (s.pct > 0 && s.rate > 0) { hours += lphBudget * s.pct / 100 / s.rate; hasDistribution = true }
+      }
+    }
+    return { hours, hasDistribution }
+  }
+  // Bei aktiver HOAI-Quelle die echte AG-/LPH-Auswahl je Gewerk nutzen, sonst die
+  // bisherige Verteilung des Gewerkbudgets über die Dummy-LPH-Prozente.
   const gewerkSollByName: Record<string, { hours: number; hasDistribution: boolean }> = {
-    HLKS: gewerkSollHours(hlksBudget),
-    Elektro: gewerkSollHours(elektroBudget),
+    HLKS: hoaiLphBudget ? gewerkSollHoursFromLphMap(hoaiLphBudget.HLKS) : gewerkSollHours(hlksBudget),
+    Elektro: hoaiLphBudget ? gewerkSollHoursFromLphMap(hoaiLphBudget.Elektro) : gewerkSollHours(elektroBudget),
   }
 
   // IST: Mitarbeiterstunden je KW werden gleichmäßig auf die in dieser KW aktiven,
@@ -1221,7 +1291,8 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     const isSel = realLphId === s.lph_id
     const isExpanded = expandedLphId === s.lph_id
     const color = lphColor(s.lph_number)
-    const barHasBudget = (lphBudgets[s.lph_id]?.budget_eur ?? s.budget_eur ?? 0) > 0
+    // 10.4: „hat Budget" über die effektive Planungsbasis (HOAI-Quelle berücksichtigt).
+    const barHasBudget = effectiveLphBudgetEur(s) > 0
     const barIst = istByLph[s.lph_id] ?? 0
     const barSoll = sollByLph[s.lph_id] ?? 0
     return (
@@ -1358,8 +1429,9 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
             <div className="p-5 space-y-3 overflow-y-auto">
               <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
                 <p className="text-[11px] text-amber-700">
-                  Quelle <strong>HOAI</strong> ist gespeichert. Ein gewähltes Dummy-Szenario belegt die
-                  AG-Budgets (AG 1–5) <strong>transparent</strong> über eine vereinfachte Verteilung vor
+                  Quelle <strong>HOAI</strong> ist gespeichert. Ein gewähltes Szenario belegt die AG-Budgets
+                  (AG 1–5) <strong>transparent</strong> vor: bei AG-Detailszenarien aus der je AG
+                  <strong> ausgewählten LPH-Auswahl</strong>, bei Alt-Szenarien über eine vereinfachte Verteilung
                   (Summe {HOAI_DUMMY_AG_SPLIT_SUM}%). <strong>Keine</strong> rechtsverbindliche HOAI-Berechnung;
                   Abacus-Budgets bleiben unberührt.
                 </p>
@@ -1380,7 +1452,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                           {s.label}{active && <span className="ml-1.5 text-[10px] text-emerald-600 font-semibold">· aktiv</span>}
                         </p>
                         <p className="text-[10px] text-slate-400 truncate">
-                          {fmtEur(s.anrechenbare_kosten)} · {s.honorar_pct}% → {fmtEur(total)} Gesamthonorar
+                          {fmtEur(s.anrechenbare_kosten)} · {s.honorar_pct}% → {fmtEur(total)} Grundhonorar
                         </p>
                       </button>
                     )

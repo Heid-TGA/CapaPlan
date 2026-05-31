@@ -25,6 +25,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { calcHoaiDummy } from '@/lib/hoai-dummy'
 import { HOAI_DUMMY_AG_SPLIT, AG_NUMBERS } from '@/lib/anlagengruppen'
+import { grundhonorar, lphHonorar } from '@/lib/hoai-ag'
 
 export type BudgetSourceType = 'abacus' | 'hoai' | 'manual'
 
@@ -242,12 +243,17 @@ export async function saveProjectAgBudgets(
   return loadProjectAgBudgets(projectId)
 }
 
-// AG-Budgets aus einem gespeicherten HOAI-Dummy-Szenario VORBELEGEN.
+// AG-Budgets aus einem gespeicherten HOAI-Szenario VORBELEGEN.
 //   * Szenario muss zum Projekt gehoeren.
-//   * Gesamthonorar = anrechenbare_kosten × honorar_pct / 100 (Dummy).
-//   * Verteilung auf AG 1–5 ueber HOAI_DUMMY_AG_SPLIT (transparent/unverbindlich).
-//   * source_type der erzeugten Zeilen = 'hoai'.
-//   * Schreibt NICHT in project_lph_budgets.
+//   * source_type der erzeugten Zeilen = 'hoai'. Schreibt NICHT in project_lph_budgets.
+//
+// Zwei Faelle abhaengig vom Szenario-Modus (Paket 10.4):
+//   * mode='ag'  -> AG-Budget = Σ der AUSGEWAEHLTEN LPH-Honorare dieser AG
+//                   (lph_honorar = grundhonorar × pct/100; grundhonorar =
+//                   anrechenbare_kosten × honorar_pct/100). Deaktivierte AG -> 0.
+//                   Das ist die fachlich genaue Uebernahme.
+//   * mode='simple' (Alt, Paket 6B) -> Gesamthonorar (Dummy) ueber
+//                   HOAI_DUMMY_AG_SPLIT auf AG 1–5 verteilt (transparent/unverbindlich).
 export async function deriveAgBudgetsFromHoaiScenario(
   projectId: string,
   scenarioId: string
@@ -261,13 +267,53 @@ export async function deriveAgBudgetsFromHoaiScenario(
 
   const { data: scenario, error } = await supabase
     .from('hoai_calc_scenarios')
-    .select('anrechenbare_kosten, honorar_pct')
+    .select('anrechenbare_kosten, honorar_pct, mode')
     .eq('id', scenarioId)
     .maybeSingle()
 
   if (error) return { success: false, data: [], message: error.message }
   if (!scenario) return { success: false, data: [], message: 'HOAI-Szenario nicht gefunden.' }
 
+  // ── AG-Detailszenario: Σ ausgewaehlte LPH-Honorare je AG ──────────────────
+  if (scenario.mode === 'ag') {
+    const [{ data: agRows, error: agErr }, { data: lphRows, error: lphErr }] = await Promise.all([
+      supabase
+        .from('hoai_scenario_ag')
+        .select('ag_number, enabled, anrechenbare_kosten, honorar_pct')
+        .eq('scenario_id', scenarioId),
+      supabase
+        .from('hoai_scenario_ag_lph')
+        .select('ag_number, lph_number, selected, pct')
+        .eq('scenario_id', scenarioId),
+    ])
+    if (agErr) return { success: false, data: [], message: agErr.message }
+    if (lphErr) return { success: false, data: [], message: lphErr.message }
+
+    // Grundhonorar je AKTIVER AG (deaktivierte AG -> kein Eintrag -> 0 Budget).
+    const grundByAg = new Map<number, number>()
+    for (const a of agRows ?? []) {
+      if (!a.enabled) continue
+      grundByAg.set(Number(a.ag_number), grundhonorar(Number(a.anrechenbare_kosten), Number(a.honorar_pct)))
+    }
+    const budgetByAg = new Map<number, number>()
+    for (const l of lphRows ?? []) {
+      if (!l.selected) continue
+      const grund = grundByAg.get(Number(l.ag_number))
+      if (grund == null) continue
+      budgetByAg.set(
+        Number(l.ag_number),
+        (budgetByAg.get(Number(l.ag_number)) ?? 0) + lphHonorar(grund, Number(l.pct))
+      )
+    }
+    const rows: AgBudgetInput[] = AG_NUMBERS.map((ag) => ({
+      ag_number: ag,
+      budget_eur: round2(budgetByAg.get(ag) ?? 0),
+      source_type: 'hoai',
+    }))
+    return saveProjectAgBudgets(projectId, rows)
+  }
+
+  // ── Alt-Szenario (simple): Dummy-Gesamthonorar ueber HOAI_DUMMY_AG_SPLIT ──
   const total = calcHoaiDummy(
     Number(scenario.anrechenbare_kosten),
     Number(scenario.honorar_pct)
