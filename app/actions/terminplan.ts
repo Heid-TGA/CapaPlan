@@ -9,6 +9,10 @@ export interface LphSchedule {
   start_kw: number | null
   end_kw: number | null
   plan_year: number
+  // TGA-Budgetbereich (HLKS/ELT/…). null = bereichslos (Nicht-TGA / bisheriges
+  // Verhalten). Wird ab Paket 8D mitgeführt, damit Lookups area-scoped bleiben;
+  // die UI zeigt noch keine Bereiche an, darf aber bei gesetztem Wert nicht brechen.
+  area_id: string | null
 }
 
 export interface Milestone {
@@ -32,7 +36,7 @@ export async function loadTerminplan(projectId: string): Promise<{
 
   const { data: lphData, error: lphError } = await supabase
     .from('project_lph_budgets')
-    .select('id, lph_number, budget_eur, start_kw, end_kw, plan_year')
+    .select('id, lph_number, budget_eur, start_kw, end_kw, plan_year, area_id')
     .eq('project_id', projectId)
     .order('lph_number')
 
@@ -53,6 +57,7 @@ export async function loadTerminplan(projectId: string): Promise<{
     start_kw: l.start_kw,
     end_kw: l.end_kw,
     plan_year: l.plan_year ?? 2026,
+    area_id: l.area_id ?? null,
   }))
 
   const milestones: Milestone[] = (msData ?? []).map((m) => {
@@ -144,11 +149,18 @@ export async function deleteMilestone(
 // Zeile mit budget_eur = 0 an, damit die LPH eine echte lph_id bekommt (Terminbalken,
 // Meilensteine). Eine bereits vorhandene Zeile wird NICHT überschrieben — weder Budget
 // noch start_kw/end_kw/plan_year. plan_year nutzt beim Anlegen den DB-Default (2026).
-// Abacus kann diese 0-Euro-Zeile später via upsert(onConflict: project_id,lph_number)
-// mit echtem budget_eur aktualisieren, ohne die Terminplanfelder zu verlieren.
+// Abacus kann diese 0-Euro-Zeile später via upsert(onConflict: project_id,area_id,
+// lph_number) mit echtem budget_eur aktualisieren, ohne die Terminplanfelder zu verlieren.
+//
+// areaId (Paket 8D): optionaler TGA-Budgetbereich. Standard null = bereichslos
+// (bisheriges Verhalten). Select UND Insert sind immer area-scoped, damit bei
+// mehreren Bereichszeilen je (project_id, lph_number) keine Mehrdeutigkeit
+// entsteht — bei null wird .is('area_id', null), sonst .eq('area_id', areaId)
+// genutzt. Bestehende Aufrufe ohne areaId bleiben unverändert (null).
 export async function ensureLphBudgetRow(
   projectId: string,
-  lphNumber: number
+  lphNumber: number,
+  areaId: string | null = null
 ): Promise<{ success: boolean; message: string; row: LphSchedule | null }> {
   if (!Number.isInteger(lphNumber) || lphNumber < 1 || lphNumber > 9) {
     return { success: false, message: 'lph_number muss zwischen 1 und 9 liegen', row: null }
@@ -157,12 +169,17 @@ export async function ensureLphBudgetRow(
   const supabase = await createClient()
 
   // 1. Bereits vorhanden? Dann unverändert zurückgeben (nichts überschreiben).
-  const { data: existing, error: selError } = await supabase
+  //    Lookup immer area-scoped: null → IS NULL, sonst exakter Bereich.
+  let selectQuery = supabase
     .from('project_lph_budgets')
-    .select('id, lph_number, budget_eur, start_kw, end_kw, plan_year')
+    .select('id, lph_number, budget_eur, start_kw, end_kw, plan_year, area_id')
     .eq('project_id', projectId)
     .eq('lph_number', lphNumber)
-    .maybeSingle()
+  selectQuery = areaId == null
+    ? selectQuery.is('area_id', null)
+    : selectQuery.eq('area_id', areaId)
+
+  const { data: existing, error: selError } = await selectQuery.maybeSingle()
 
   if (selError) return { success: false, message: selError.message, row: null }
 
@@ -177,6 +194,7 @@ export async function ensureLphBudgetRow(
         start_kw: existing.start_kw,
         end_kw: existing.end_kw,
         plan_year: existing.plan_year ?? 2026,
+        area_id: existing.area_id ?? null,
       },
     }
   }
@@ -184,8 +202,8 @@ export async function ensureLphBudgetRow(
   // 2. Nicht vorhanden → neue 0-Euro-Zeile. start_kw/end_kw bleiben NULL (noch kein Balken).
   const { data: created, error: insError } = await supabase
     .from('project_lph_budgets')
-    .insert({ project_id: projectId, lph_number: lphNumber, budget_eur: 0 })
-    .select('id, lph_number, budget_eur, start_kw, end_kw, plan_year')
+    .insert({ project_id: projectId, lph_number: lphNumber, budget_eur: 0, area_id: areaId })
+    .select('id, lph_number, budget_eur, start_kw, end_kw, plan_year, area_id')
     .single()
 
   if (insError) return { success: false, message: insError.message, row: null }
@@ -200,6 +218,7 @@ export async function ensureLphBudgetRow(
       start_kw: created.start_kw,
       end_kw: created.end_kw,
       plan_year: created.plan_year ?? 2026,
+      area_id: created.area_id ?? null,
     },
   }
 }

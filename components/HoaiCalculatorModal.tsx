@@ -94,7 +94,7 @@ export default function HoaiCalculatorModal({ projectId, projectName, onClose }:
     return () => { cancelled = true }
   }, [projectId])
 
-  // Standardbereiche (HLS/Elektro/Sonstige) fuer dieses Projekt anlegen.
+  // Standardbereiche (HLKS/ELT/Sonstige) fuer dieses Projekt anlegen.
   async function handleSeedAreas() {
     if (seeding) return
     setSeeding(true); setError(null)

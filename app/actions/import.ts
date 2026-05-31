@@ -110,16 +110,22 @@ export async function importAbacusBudgets(
           if (typeof lph.lph_number !== 'number' || typeof lph.budget_eur !== 'number') continue
           if (lph.lph_number === 9) continue // LPH 9 wird nicht verwendet
 
+          // area_id = null: Abacus liefert (noch) keinen TGA-Bereich. Damit greift
+          // der NULLS-NOT-DISTINCT-Unique-Index (project_id, area_id, lph_number)
+          // aus Patch 8C wie bisher: pro Projekt genau eine bereichslose LPH-Zeile.
+          // onConflict MUSS auf den neuen Key zeigen — der alte (project_id,
+          // lph_number)-Conflict-Target existiert nach dem Patch nicht mehr.
           const { error: lphError } = await supabase
             .from('project_lph_budgets')
             .upsert(
               {
                 project_id: upsertedProj.id,
+                area_id: null,
                 lph_number: lph.lph_number,
                 budget_eur: lph.budget_eur,
                 synced_at: new Date().toISOString(),
               },
-              { onConflict: 'project_id,lph_number' }
+              { onConflict: 'project_id,area_id,lph_number' }
             )
 
           if (lphError) {
@@ -186,9 +192,12 @@ export async function importHiAllocations(
 
   const projectMap = new Map(projects?.map((p) => [p.project_number, p.id]) ?? [])
 
+  // area_id wird mitgeladen, damit H&I (kein Bereichsformat) ausschließlich die
+  // bereichslosen Zeilen (area_id = NULL) matcht und HLKS/ELT-Zeilen nicht
+  // versehentlich getroffen werden.
   const { data: lphBudgets } = await supabase
     .from('project_lph_budgets')
-    .select('id, project_id, lph_number')
+    .select('id, project_id, lph_number, area_id')
 
   // Tageseinträge zu KW-Summen aggregieren
   // Stunden = percentage/100 × (weekly_capacity_hours / 5 Tage)
@@ -240,15 +249,30 @@ export async function importHiAllocations(
 
   let imported = 0
   let skipped = 0
+  let ambiguous = 0
 
   for (const agg of aggregated.values()) {
     const projectId = projectMap.get(agg.projectNumber)
     if (!projectId) { skipped++; continue }
 
-    const lph = lphBudgets?.find(
-      (l) => l.project_id === projectId && l.lph_number === agg.lphNumber
+    // H&I kennt keinen Bereich → nur bereichslose LPH-Zeilen (area_id = NULL)
+    // matchen. Bei mehreren Treffern (z. B. künftige HLKS/ELT-Bereichszeilen,
+    // die hier aber bereichslos wären) NICHT willkürlich die erste nehmen,
+    // sondern überspringen und loggen.
+    const matches = (lphBudgets ?? []).filter(
+      (l) => l.project_id === projectId && l.lph_number === agg.lphNumber && l.area_id === null
     )
-    if (!lph) { skipped++; continue }
+    if (matches.length === 0) { skipped++; continue }
+    if (matches.length > 1) {
+      ambiguous++
+      console.warn(
+        `[H&I] Mehrdeutiger LPH-Match (übersprungen): Projekt ${agg.projectNumber}, ` +
+        `LPH ${agg.lphNumber}, ${matches.length} bereichslose Zeilen. Eindeutige ` +
+        `Zuordnung über area_id nötig (Bereichsformat folgt in späterem Paket).`
+      )
+      continue
+    }
+    const lph = matches[0]
 
     const { error } = await supabase
       .from('allocations')
@@ -278,6 +302,7 @@ export async function importHiAllocations(
   const warnings: string[] = []
   if (unresolved > 0) warnings.push(`${unresolved} Einträge ohne Mitarbeiter-Match (zuerst Abacus importieren!)`)
   if (skipped > 0) warnings.push(`${skipped} Projekt/LPH nicht in DB`)
+  if (ambiguous > 0) warnings.push(`${ambiguous} mehrdeutige LPH (mehrere bereichslose Zeilen, übersprungen)`)
 
   return {
     success: imported > 0,

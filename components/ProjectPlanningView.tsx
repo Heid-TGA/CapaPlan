@@ -2,7 +2,7 @@
 
 import { useState, useTransition, useEffect, useRef, Fragment } from 'react'
 import { TrendingDown, Users, Clock, Euro, Circle, ChevronRight, ChevronLeft, Plus, X, Calculator } from 'lucide-react'
-import { upsertAllocation, getLphBudgetStatus } from '@/app/actions/allocation'
+import { upsertAllocation, getLphBudgetStatusById } from '@/app/actions/allocation'
 import { loadProjectAllocationsForWindow } from '@/app/actions/heatmap'
 import { loadTerminplan, saveLphSchedule, saveMilestone, ensureLphBudgetRow, type LphSchedule, type Milestone } from '@/app/actions/terminplan'
 import { loadExternalTrades, createExternalTrade, deleteExternalTrade, type ExternalTrade } from '@/app/actions/external-trades'
@@ -164,10 +164,16 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
   // ── Laden ──────────────────────────────────────────────────────────────────
 
-  async function fetchLphBudgets(project: Project): Promise<Record<number, LphBudget>> {
+  // Budgetstatus je LPH-Zeile EINDEUTIG über ihre lph_id (Paket 8D) statt über
+  // (project_id, lph_number) — letzteres wäre bei künftigen HLKS/ELT-Bereichszeilen
+  // mehrdeutig. Quelle der lph_ids sind die geladenen Terminplan-Schedules.
+  // Schlägt der id-basierte RPC fehl (z. B. Patch 8C noch nicht ausgeführt), wird
+  // die betroffene LPH einfach übersprungen (try/catch) — kein Crash.
+  // Keying weiterhin per lph_number (bereichslose Projekte: pro Nummer genau eine Zeile).
+  async function fetchLphBudgets(schedules: LphSchedule[]): Promise<Record<number, LphBudget>> {
     const map: Record<number, LphBudget> = {}
-    for (const n of ALL_LPH) {
-      try { const b = await getLphBudgetStatus(project.id, n); if (b) map[n] = b } catch {}
+    for (const s of schedules) {
+      try { const b = await getLphBudgetStatusById(s.lph_id); if (b) map[s.lph_number] = b } catch {}
     }
     return map
   }
@@ -188,12 +194,14 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
   async function loadAll(project: Project) {
     try {
-      const [budgets, alloc, term, rolePlansRes] = await Promise.all([
-        fetchLphBudgets(project),
+      const [alloc, term, rolePlansRes] = await Promise.all([
         fetchAllocations(project),
         loadTerminplan(project.id),
         loadProjectRolePlans(project.id),
       ])
+      // Budgetstatus erst nach dem Terminplan: braucht die lph_ids der Schedules
+      // (id-basierter RPC, Paket 8D).
+      const budgets = await fetchLphBudgets(term.schedules)
       setLphBudgets(budgets)
       setAllocations(alloc.map)
       setSchedules(term.schedules)
@@ -437,11 +445,12 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
         : [...prev, row])
       setVisibleLph(prev => new Set(prev).add(n))
       setSelectedLph(n)
-      // Budgetstatus nachladen (für „Verplante Stunden" / spätere Allocations).
+      // Budgetstatus nachladen (für „Verplante Stunden" / spätere Allocations) —
+      // eindeutig über die neue lph_id der gerade sichergestellten Zeile (Paket 8D).
       try {
-        const b = await getLphBudgetStatus(selectedProject.id, n)
+        const b = await getLphBudgetStatusById(row.lph_id)
         if (b) setLphBudgets(prev => ({ ...prev, [n]: b }))
-      } catch { /* 0-Euro-LPH: Budgetkarte greift auf totalBudget>0-Guard zurück */ }
+      } catch { /* 0-Euro-LPH oder Patch 8C noch nicht ausgeführt: Budgetkarte greift auf totalBudget>0-Guard zurück */ }
     } catch (e) {
       console.error(e)
     } finally {

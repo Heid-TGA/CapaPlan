@@ -22,7 +22,8 @@ export interface BudgetArea {
 }
 
 // Default-Bereiche fuer TGA-Projekte (Reihenfolge = sort_order).
-const DEFAULT_BUDGET_AREAS = ['HLS', 'Elektro', 'Sonstige'] as const
+// 8C: fachliche Benennung HLKS (AG 1–3) / ELT (AG 4–5) / Sonstige.
+const DEFAULT_BUDGET_AREAS = ['HLKS', 'ELT', 'Sonstige'] as const
 
 const SELECT_COLS = 'id, project_id, name, sort_order'
 

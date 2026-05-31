@@ -3,8 +3,13 @@
 import { createClient } from '@/lib/supabase/server'
 
 /**
- * Gibt den Budget-Status einer LPH zurück.
+ * Gibt den Budget-Status einer LPH zurück (LEGACY: lookup über project_id + lph_number).
  * hourly_rate_eur wird NIEMALS ans Frontend übergeben.
+ *
+ * Hinweis (Paket 8D): Sobald ein Projekt LPH getrennt nach Budgetbereichen
+ * (HLKS/ELT) führt, ist (project_id, lph_number) mehrdeutig. Für eine konkrete
+ * LPH-Zeile daher bevorzugt getLphBudgetStatusById(lphId) nutzen. Diese Variante
+ * bleibt für reine area_id = NULL-Projekte korrekt.
  */
 export async function getLphBudgetStatus(
   projectId: string,
@@ -24,6 +29,32 @@ export async function getLphBudgetStatus(
     utilization_pct: number
     total_hours: number
   }
+}
+
+/**
+ * Gibt den Budget-Status einer LPH-Zeile EINDEUTIG über ihre id zurück
+ * (project_lph_budgets.id). Verträgt mehrere Bereichszeilen (HLKS/ELT) je
+ * (project_id, lph_number) und ist daher der bevorzugte Lookup ab Paket 8D.
+ *
+ * Nutzt die additive RPC get_lph_budget_status_by_id (Patch 8C). Solange der
+ * SQL-Patch nicht ausgeführt ist, fehlt diese RPC in der DB und der Aufruf
+ * wirft zur Laufzeit — der Build ist davon nicht betroffen.
+ * hourly_rate_eur wird NIEMALS ans Frontend übergeben.
+ */
+export async function getLphBudgetStatusById(lphId: string) {
+  const supabase = await createClient()
+  const { data, error } = await supabase.rpc('get_lph_budget_status_by_id', {
+    p_lph_id: lphId,
+  })
+  if (error) throw new Error(error.message)
+  return data[0] as {
+    lph_number: number
+    budget_eur: number
+    allocated_eur: number
+    remaining_eur: number
+    utilization_pct: number
+    total_hours: number
+  } | undefined
 }
 
 /**
