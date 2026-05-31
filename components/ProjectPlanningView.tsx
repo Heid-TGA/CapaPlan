@@ -573,8 +573,31 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   function allocKey(empId: string, lphId: string) { return `${empId}_${lphId}` }
   function getHours(empId: string, lphId: string, kw: number) { return allocations[allocKey(empId, lphId)]?.[kw]?.hours ?? 0 }
   function getSource(empId: string, lphId: string, kw: number) { return allocations[allocKey(empId, lphId)]?.[kw]?.source }
-  function getEmpLphTotal(empId: string) { return activeLph == null ? 0 : windowWeeks.reduce((s, w) => s + getHours(empId, primaryLphId, w.week), 0) }
-  function getKwLphTotal(kw: number) { return activeLph == null ? 0 : allEmployees.reduce((sum, emp) => sum + getHours(emp.id, primaryLphId, kw), 0) }
+
+  // Synthetischer Client-Key einer LPH-Nummer (identisch zu fetchAllocations).
+  function lphKey(n: number) { return `${selectedProject?.id}_lph${n}` }
+
+  // ── Projektbezogene Matrix (6B-2D) ──────────────────────────────────────────
+  // Die Matrix-Zelle bedeutet MITARBEITER + PROJEKT + KW (LPH-unabhängig): Summe
+  // der Stunden über ALLE LPH dieses Projekts. Dadurch ändert sich der Wert NICHT,
+  // wenn links eine andere LPH ausgewählt wird. Die LPH-Zuordnung für IST/SOLL
+  // erfolgt separat, rein rechnerisch über die zeitliche Lage der LPH-Balken.
+  function getProjectHours(empId: string, kw: number) {
+    return schedules.reduce((s, sc) => s + getHours(empId, lphKey(sc.lph_number), kw), 0)
+  }
+  // Repräsentative Quelle für die Zellfarbe: Manuell hat Vorrang vor H&I.
+  function getProjectSource(empId: string, kw: number): 'H&I' | 'Manuell_PL' | undefined {
+    let hasHI = false, hasManual = false
+    for (const sc of schedules) {
+      if (getHours(empId, lphKey(sc.lph_number), kw) <= 0) continue
+      const src = getSource(empId, lphKey(sc.lph_number), kw)
+      if (src === 'Manuell_PL') hasManual = true
+      else if (src === 'H&I') hasHI = true
+    }
+    return hasManual ? 'Manuell_PL' : hasHI ? 'H&I' : undefined
+  }
+  function getEmpProjectTotal(empId: string) { return windowWeeks.reduce((s, w) => s + getProjectHours(empId, w.week), 0) }
+  function getKwProjectTotal(kw: number) { return allEmployees.reduce((sum, emp) => sum + getProjectHours(emp.id, kw), 0) }
   // Jahr einer Fenster-KW (für jahreswechsel-sicheres Speichern von Allocations).
   function yearOfWeek(kw: number): number { return windowWeeks.find(w => w.week === kw)?.year ?? today.year }
 
@@ -651,25 +674,67 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     for (const s of active) istByLph[s.lph_number] = (istByLph[s.lph_number] ?? 0) + share
   }
 
+  // Matrix-Speichern (6B-2D): Die Zelle ist projektbezogen (Mitarbeiter+Projekt+KW).
+  // Die DB verlangt aber weiterhin allocations.lph_id NOT NULL mit UNIQUE(lph_id,
+  // employee_id, calendar_week, year). Damit der projektbezogene Wochenwert OHNE
+  // Doppelzählung gespeichert werden kann, wird eine deterministische Carrier-
+  // Strategie genutzt: die gesamte Wochenstundenzahl liegt auf der aktiven LPH
+  // (Carrier), alle anderen LPH-Zeilen dieser (Mitarbeiter,KW) werden auf 0 gesetzt.
+  // Wichtig: Gespeichert wird über die ECHTE lph_id (UUID), nicht über den
+  // synthetischen Client-Key.
   function commitEdit(empId: string, kw: number, value: string) {
-    if (activeLph == null) { setEditCell(null); return }
+    if (activeLph == null || !selectedProject) { setEditCell(null); return }
     const hours = Math.max(0, Math.min(60, parseFloat(value) || 0))
-    const lphId = primaryLphId
-    setAllocations(prev => ({ ...prev, [allocKey(empId, lphId)]: { ...prev[allocKey(empId, lphId)], [kw]: { hours, source: 'Manuell_PL' } } }))
+    const carrierKey = allocKey(empId, primaryLphId)
     setEditCell(null)
-    if (empId.startsWith('dummy-') || !selectedProject) return
-    const lphNum = activeLph
+
+    // Andere LPH dieses Mitarbeiters/Projekts, die in dieser KW Stunden tragen.
+    const otherLphNums = schedules
+      .map(s => s.lph_number)
+      .filter(n => n !== activeLph && getHours(empId, lphKey(n), kw) > 0)
+
+    // Lokaler State: Carrier = volle Wochenstunden, alle anderen LPH = 0.
+    setAllocations(prev => {
+      const next: AllocMap = { ...prev }
+      next[carrierKey] = { ...next[carrierKey], [kw]: { hours, source: 'Manuell_PL' } }
+      for (const n of otherLphNums) {
+        const k = allocKey(empId, lphKey(n))
+        const prevSrc = next[k]?.[kw]?.source ?? 'Manuell_PL'
+        next[k] = { ...next[k], [kw]: { hours: 0, source: prevSrc } }
+      }
+      return next
+    })
+
+    if (empId.startsWith('dummy-')) return
+    if (!realLphId) return // ohne echte lph_id kein DB-Write möglich
+
+    const carrierLphNum = activeLph
+    const carrierRealId = realLphId
+    const yr = yearOfWeek(kw)
+    const project = selectedProject
+
+    const applyBudget = (lphNum: number, res: { remaining_eur: number; utilization_pct: number } | null) => {
+      if (!res) return
+      setLphBudgets(prev => {
+        const b = prev[lphNum]
+        if (!b) return prev
+        return { ...prev, [lphNum]: { ...b, remaining_eur: res.remaining_eur, utilization_pct: res.utilization_pct } }
+      })
+    }
+
     startTransition(async () => {
       try {
-        const result = await upsertAllocation(selectedProject.id, lphId, empId, kw, yearOfWeek(kw), hours)
-        if (result) {
-          setLphBudgets(prev => {
-            const b = prev[lphNum]
-            if (!b) return prev
-            return { ...prev, [lphNum]: { ...b, remaining_eur: result.remaining_eur, utilization_pct: result.utilization_pct } }
-          })
+        // 1) Carrier-LPH = volle projektbezogene Wochenstunden.
+        const result = await upsertAllocation(project.id, carrierRealId, empId, kw, yr, hours)
+        applyBudget(carrierLphNum, result)
+        // 2) Andere LPH dieser (Mitarbeiter,KW) auf 0 → keine Doppelzählung.
+        for (const n of otherLphNums) {
+          const realId = schedules.find(s => s.lph_number === n)?.lph_id
+          if (!realId || realId === carrierRealId) continue
+          const res2 = await upsertAllocation(project.id, realId, empId, kw, yr, 0)
+          applyBudget(n, res2)
         }
-      } catch(e) { console.error(e) }
+      } catch (e) { console.error(e) }
     })
   }
 
@@ -1250,7 +1315,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                 </div>,
                 ...deptEmps.map(emp => {
                   const isDummy = emp.id.startsWith('dummy-')
-                  const empTotal = getEmpLphTotal(emp.id)
+                  const empTotal = getEmpProjectTotal(emp.id)
                   return (
                     <div key={emp.id} className="flex border-b border-slate-100 hover:bg-slate-50/30 transition-colors">
                       {/* Name */}
@@ -1263,8 +1328,9 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                       {/* KW-Zellen */}
                       {windowWeeks.map((w) => {
                         const kw = w.week
-                        const hoursKw = activeLph != null ? getHours(emp.id, primaryLphId, kw) : 0
-                        const src = getSource(emp.id, primaryLphId, kw)
+                        // Projektbezogen (LPH-unabhängig): Summe über alle LPH.
+                        const hoursKw = getProjectHours(emp.id, kw)
+                        const src = getProjectSource(emp.id, kw)
                         const isEditing = editCell?.empId === emp.id && editCell?.kw === kw
                         const inRange = isInRange(w)
                         const isHI = hiKeys.has(weekKey(w))
@@ -1313,7 +1379,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                 return (
                   <div key={weekKey(w)} style={{ width: COL_WIDTH, minWidth: COL_WIDTH }}
                     className={`text-center text-xs font-semibold text-slate-500 py-2.5 border-r border-slate-50 ${isHI ? 'bg-blue-50/40' : inRange ? 'bg-amber-50/50' : ''}`}>
-                    {getKwLphTotal(w.week) > 0 ? `${Math.round(getKwLphTotal(w.week))}h` : '—'}
+                    {getKwProjectTotal(w.week) > 0 ? `${Math.round(getKwProjectTotal(w.week))}h` : '—'}
                   </div>
                 )
               })}
