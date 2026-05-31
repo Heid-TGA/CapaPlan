@@ -1,264 +1,120 @@
 'use client'
 
-import { useState, useRef, useCallback, useEffect } from 'react'
-import { GripVertical } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
+import type { WeekRef } from '@/lib/calendar-weeks'
 
 interface GanttBarProps {
   lphId: string
   lphNumber: number
-  weeks: number[]
+  weeks: WeekRef[]          // sichtbares Fenster (ISO-Wochen mit Jahr)
+  planYear: number          // plan_year der LPH-Zeile (Jahr von start_kw/end_kw)
   colWidth: number
   startKw: number | null
   endKw: number | null
   color: string
-  onChange: (lphId: string, startKw: number, endKw: number) => void
-  onSave: (lphId: string, startKw: number, endKw: number) => void
+  onChange: (lphId: string, startKw: number, endKw: number, planYear: number) => void
+  onSave: (lphId: string, startKw: number, endKw: number, planYear: number) => void
 }
 
-// ── Popover ────────────────────────────────────────────────────────────────────
-
-function BarPopover({
-  startKw, endKw, onChange, onSave, onClose, anchorRef,
-}: {
-  startKw: number; endKw: number
-  onChange: (s: number, e: number) => void
-  onSave: (s: number, e: number) => void
-  onClose: () => void
-  anchorRef: React.RefObject<HTMLDivElement | null>
-}) {
-  const [ls, setLs] = useState(String(startKw))
-  const [le, setLe] = useState(String(endKw))
-  const popRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => { setLs(String(startKw)) }, [startKw])
-  useEffect(() => { setLe(String(endKw)) }, [endKw])
-
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (popRef.current && !popRef.current.contains(e.target as Node) &&
-          anchorRef.current && !anchorRef.current.contains(e.target as Node)) onClose()
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [onClose, anchorRef])
-
-  return (
-    <div ref={popRef}
-      className="absolute top-full mt-2 left-0 z-50 bg-white rounded-xl border border-slate-200 shadow-xl p-4 w-52"
-      onClick={e => e.stopPropagation()}>
-      <div className="absolute -top-1.5 left-5 h-3 w-3 bg-white border-l border-t border-slate-200 rotate-45" />
-      <p className="text-xs font-semibold text-slate-700 mb-3">LPH-Zeitraum</p>
-      <div className="flex items-center gap-2 mb-3">
-        <div className="flex-1">
-          <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Start KW</label>
-          <input type="number" min="1" max="53" value={ls}
-            onChange={e => { setLs(e.target.value); const n=parseInt(e.target.value); if(n>=1&&n<=endKw) onChange(n,endKw) }}
-            className="w-full text-sm font-semibold border border-slate-200 rounded-lg px-2 py-2 outline-none focus:border-slate-400 text-center text-slate-800" />
-        </div>
-        <span className="text-slate-300 mt-5 text-xs">→</span>
-        <div className="flex-1">
-          <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Ende KW</label>
-          <input type="number" min="1" max="53" value={le}
-            onChange={e => { setLe(e.target.value); const n=parseInt(e.target.value); if(n>=startKw&&n<=53) onChange(startKw,n) }}
-            className="w-full text-sm font-semibold border border-slate-200 rounded-lg px-2 py-2 outline-none focus:border-slate-400 text-center text-slate-800" />
-        </div>
-      </div>
-      <p className="text-[10px] text-slate-400 mb-3">Dauer: {endKw-startKw+1} Woche{endKw-startKw!==0?'n':''}</p>
-      <button onClick={() => { onSave(startKw, endKw); onClose() }}
-        className="w-full py-1.5 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 transition-colors">
-        Speichern
-      </button>
-    </div>
-  )
-}
-
-// ── GanttBar ───────────────────────────────────────────────────────────────────
-
+// Drag & Resize Gantt-Balken für eine LPH-Zeile.
+// Positioniert sich über (week, year) im sichtbaren Fenster und schreibt echte
+// KW-Werte + plan_year zurück. Jahreswechsel-sicher: ein KW-Wert wird nur in
+// seinem plan_year-Jahr getroffen. Balken ohne Termin (startKw/endKw null)
+// erscheinen weiterhin als Default-Balken zum Anlegen per Drag.
 export default function GanttBar({
-  lphId, lphNumber, weeks, colWidth, startKw, endKw,
-  color, onChange, onSave,
+  lphId, lphNumber, weeks, planYear, colWidth, startKw, endKw, color, onChange, onSave,
 }: GanttBarProps) {
-  const [showPopover, setShowPopover] = useState(false)
-  const [hovered, setHovered] = useState(false)
-  const [dragging, setDragging] = useState(false)
-  const [resizingLeft, setResizingLeft] = useState(false)
-  const [resizingRight, setResizingRight] = useState(false)
+  const [drag, setDrag] = useState<null | { mode: 'move' | 'resize-l' | 'resize-r'; startX: number; origStart: number; origEnd: number }>(null)
+  // Zuletzt emittierte Werte — vermeidet stale-closure beim mouseup/onSave.
+  const lastRef = useRef<{ startKw: number; endKw: number; year: number } | null>(null)
 
-  const barRef = useRef<HTMLDivElement>(null)
-  const dragStartX = useRef(0)
-  const dragStartKw = useRef({ start: 0, end: 0 })
-  const didDrag = useRef(false)
+  const hasSchedule = startKw != null && endKw != null
 
-  function kwToIdx(kw: number) { return weeks.indexOf(kw) }
-  function idxToKw(idx: number) { return weeks[Math.max(0, Math.min(weeks.length-1, idx))]! }
-  function snapDelta(x0: number, x1: number) { return Math.round((x1-x0)/colWidth) }
+  // Index der Start/End-KW im Fenster: week UND year müssen passen.
+  const startIdx = weeks.findIndex((w) => w.week === startKw && w.year === planYear)
+  const endIdx = weeks.findIndex((w) => w.week === endKw && w.year === planYear)
 
-  // ── Move ──────────────────────────────────────────────────────────────────
+  // Sichtbarkeit: Ohne Termin immer (Default-Balken). Mit Termin nur, wenn
+  // mindestens eine Kante im Fenster liegt (sonst liegt der Balken außerhalb).
+  const renderBar = !hasSchedule || startIdx >= 0 || endIdx >= 0
 
-  const onMoveDown = useCallback((e: React.PointerEvent) => {
-    if (startKw === null || endKw === null) return
-    e.preventDefault(); e.stopPropagation()
-    setDragging(true); setShowPopover(false); didDrag.current = false
-    dragStartX.current = e.clientX
-    dragStartKw.current = { start: startKw, end: endKw }
-    const dur = endKw - startKw
-    let last = { start: startKw, end: endKw }
+  // Position inkl. Clipping an den Fensterrändern.
+  const barStart = !hasSchedule ? 0 : startIdx >= 0 ? startIdx : 0
+  const barEnd = !hasSchedule
+    ? Math.min(weeks.length - 1, 1)
+    : endIdx >= 0 ? endIdx : weeks.length - 1
 
-    function onMove(ev: PointerEvent) {
-      const d = snapDelta(dragStartX.current, ev.clientX)
-      if (d !== 0) didDrag.current = true
-      const si = Math.max(0, Math.min(weeks.length-1-dur, kwToIdx(dragStartKw.current.start)+d))
-      last = { start: idxToKw(si), end: idxToKw(si+dur) }
-      onChange(lphId, last.start, last.end)
-    }
-    function onUp() {
-      setDragging(false)
-      window.removeEventListener('pointermove', onMove)
-      window.removeEventListener('pointerup', onUp)
-      // Klick ohne Bewegung → Popover. Echtes Drag → Endposition persistieren
-      // (bisher wurde nur lokaler State via onChange geändert, nie gespeichert).
-      if (!didDrag.current) { setShowPopover(true); return }
-      onSave(lphId, last.start, last.end)
-    }
-    window.addEventListener('pointermove', onMove)
-    window.addEventListener('pointerup', onUp)
-  }, [startKw, endKw, weeks, colWidth, lphId, onChange, onSave])
+  const left = barStart * colWidth
+  const width = (barEnd - barStart + 1) * colWidth
 
-  // ── Resize Left ───────────────────────────────────────────────────────────
-
-  const onResizeLeftDown = useCallback((e: React.PointerEvent) => {
-    if (startKw === null || endKw === null) return
-    e.preventDefault(); e.stopPropagation()
-    setResizingLeft(true); setShowPopover(false)
-    dragStartX.current = e.clientX
-    dragStartKw.current = { start: startKw, end: endKw }
-    const capEnd = endKw
-    let last = { start: startKw, end: endKw }
-    let moved = false
-
-    function onMove(ev: PointerEvent) {
-      const d = snapDelta(dragStartX.current, ev.clientX)
-      const ei = kwToIdx(dragStartKw.current.end)
-      const si = Math.max(0, Math.min(ei-1, kwToIdx(dragStartKw.current.start)+d))
-      last = { start: idxToKw(si), end: capEnd }
-      if (last.start !== dragStartKw.current.start) moved = true
-      onChange(lphId, last.start, last.end)
-    }
-    function onUp() {
-      setResizingLeft(false)
-      window.removeEventListener('pointermove', onMove)
-      window.removeEventListener('pointerup', onUp)
-      if (moved) onSave(lphId, last.start, last.end)
-    }
-    window.addEventListener('pointermove', onMove)
-    window.addEventListener('pointerup', onUp)
-  }, [startKw, endKw, weeks, colWidth, lphId, onChange, onSave])
-
-  // ── Resize Right ──────────────────────────────────────────────────────────
-
-  const onResizeRightDown = useCallback((e: React.PointerEvent) => {
-    if (startKw === null || endKw === null) return
-    e.preventDefault(); e.stopPropagation()
-    setResizingRight(true); setShowPopover(false)
-    dragStartX.current = e.clientX
-    dragStartKw.current = { start: startKw, end: endKw }
-    const capStart = startKw
-    let last = { start: startKw, end: endKw }
-    let moved = false
-
-    function onMove(ev: PointerEvent) {
-      const d = snapDelta(dragStartX.current, ev.clientX)
-      const si = kwToIdx(dragStartKw.current.start)
-      const ei = Math.max(si+1, Math.min(weeks.length-1, kwToIdx(dragStartKw.current.end)+d))
-      last = { start: capStart, end: idxToKw(ei) }
-      if (last.end !== dragStartKw.current.end) moved = true
-      onChange(lphId, last.start, last.end)
-    }
-    function onUp() {
-      setResizingRight(false)
-      window.removeEventListener('pointermove', onMove)
-      window.removeEventListener('pointerup', onUp)
-      if (moved) onSave(lphId, last.start, last.end)
-    }
-    window.addEventListener('pointermove', onMove)
-    window.addEventListener('pointerup', onUp)
-  }, [startKw, endKw, weeks, colWidth, lphId, onChange, onSave])
-
-  // ── Leere Zone ────────────────────────────────────────────────────────────
-
-  if (startKw === null || endKw === null) {
-    return (
-      <div className="relative flex items-center" style={{ height: 28 }}>
-        {weeks.map((kw) => (
-          <div key={kw} style={{ width: colWidth, minWidth: colWidth }}
-            className="h-full flex items-center justify-center group cursor-pointer border-r border-slate-50"
-            onClick={() => {
-              const si = weeks.indexOf(kw)
-              const ei = Math.min(si+3, weeks.length-1)
-              onChange(lphId, kw, weeks[ei]!)
-              onSave(lphId, kw, weeks[ei]!)
-            }}>
-            <div className="opacity-0 group-hover:opacity-40 w-full mx-1 h-4 rounded-full bg-slate-300 transition-opacity" />
-          </div>
-        ))}
-      </div>
-    )
+  const onMouseDown = (mode: 'move' | 'resize-l' | 'resize-r') => (e: React.MouseEvent) => {
+    e.stopPropagation()
+    lastRef.current = null
+    setDrag({ mode, startX: e.clientX, origStart: barStart, origEnd: barEnd })
   }
 
-  const si = kwToIdx(startKw)
-  const ei = kwToIdx(endKw)
-  const barCols = Math.max(1, ei - si + 1)
+  useEffect(() => {
+    if (!drag) return
+    const onMove = (e: MouseEvent) => {
+      const deltaCol = Math.round((e.clientX - drag.startX) / colWidth)
+      let ns = drag.origStart, ne = drag.origEnd
+      if (drag.mode === 'move') { ns = drag.origStart + deltaCol; ne = drag.origEnd + deltaCol }
+      if (drag.mode === 'resize-l') { ns = drag.origStart + deltaCol }
+      if (drag.mode === 'resize-r') { ne = drag.origEnd + deltaCol }
+      ns = Math.max(0, Math.min(weeks.length - 1, ns))
+      ne = Math.max(ns, Math.min(weeks.length - 1, ne))
+      const newStart = weeks[ns]
+      const newEnd = weeks[ne]
+      if (newStart && newEnd) {
+        // plan_year folgt der Startspalte (Modell: ein plan_year je LPH-Zeile).
+        lastRef.current = { startKw: newStart.week, endKw: newEnd.week, year: newStart.year }
+        onChange(lphId, newStart.week, newEnd.week, newStart.year)
+      }
+    }
+    const onUp = () => {
+      setDrag(null)
+      const last = lastRef.current
+      if (last) onSave(lphId, last.startKw, last.endKw, last.year)
+      else if (startKw && endKw) onSave(lphId, startKw, endKw, planYear)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [drag, colWidth, weeks, lphId, startKw, endKw, planYear, onChange, onSave])
 
   return (
-    <div className="relative flex items-center" style={{ height: 28 }}>
-      {/* Hintergrund-Raster */}
-      {weeks.map((kw) => (
-        <div key={kw} style={{ width: colWidth, minWidth: colWidth }}
-          className="h-full border-r border-slate-50 shrink-0" />
-      ))}
+    <div className="absolute inset-0">
+      {weeks.map((_, i) => {
+        const inBar = renderBar && i >= barStart && i <= barEnd
+        return (
+          <div key={i}
+            className={`absolute top-0 bottom-0`}
+            style={{ left: i * colWidth, width: colWidth }}
+            onMouseDown={inBar ? onMouseDown('move') : undefined}
+          >
+          </div>
+        )
+      })}
 
-      {/* Balken */}
-      <div ref={barRef} className="absolute"
-        style={{ left: si * colWidth + 3, width: barCols * colWidth - 6, top: 2, bottom: 2 }}>
+      {/* Sichtbarer Balken — nur wenn (teilweise) im Fenster bzw. anlegbar */}
+      {renderBar && (
         <div
-          className={`relative h-full rounded-full ${color} flex items-center select-none
-            ${dragging ? 'opacity-75 scale-95' : 'opacity-90 hover:opacity-100'}
-            transition-all duration-75`}
-          style={{ cursor: dragging ? 'grabbing' : 'grab' }}
-          onPointerDown={onMoveDown}
-          onMouseEnter={() => setHovered(true)}
-          onMouseLeave={() => setHovered(false)}
+          className={`absolute top-1 bottom-1 rounded-md ${color} cursor-move flex items-center justify-between group`}
+          style={{ left: `${left}px`, width: `${width}px` }}
+          onMouseDown={onMouseDown('move')}
         >
-          {/* Resize L */}
-          <div onPointerDown={onResizeLeftDown}
-            className={`absolute left-0 top-0 bottom-0 w-4 flex items-center justify-start pl-1
-              rounded-l-full cursor-ew-resize transition-opacity ${hovered||resizingLeft?'opacity-100':'opacity-0'}`}>
-            <GripVertical className="h-2.5 w-2 text-white/60" />
-          </div>
-
-          {/* Label */}
-          <span className="absolute inset-x-4 text-[9px] font-bold text-white truncate text-center pointer-events-none leading-none">
-            LPH {lphNumber}
+          <div onMouseDown={onMouseDown('resize-l')}
+            className="w-2 h-full cursor-ew-resize hover:bg-black/10 rounded-l-md" />
+          <span className="text-[10px] text-white/90 font-medium px-1 truncate pointer-events-none">
+            {weeks[barStart] && `KW ${weeks[barStart].week}`}
           </span>
-
-          {/* Resize R */}
-          <div onPointerDown={onResizeRightDown}
-            className={`absolute right-0 top-0 bottom-0 w-4 flex items-center justify-end pr-1
-              rounded-r-full cursor-ew-resize transition-opacity ${hovered||resizingRight?'opacity-100':'opacity-0'}`}>
-            <GripVertical className="h-2.5 w-2 text-white/60" />
-          </div>
+          <div onMouseDown={onMouseDown('resize-r')}
+            className="w-2 h-full cursor-ew-resize hover:bg-black/10 rounded-r-md" />
         </div>
-
-        {showPopover && (
-          <BarPopover
-            startKw={startKw} endKw={endKw}
-            onChange={(s, e) => onChange(lphId, s, e)}
-            onSave={(s, e) => { onSave(lphId, s, e); setShowPopover(false) }}
-            onClose={() => setShowPopover(false)}
-            anchorRef={barRef as React.RefObject<HTMLDivElement>}
-          />
-        )}
-      </div>
+      )}
     </div>
   )
 }

@@ -121,3 +121,49 @@ export async function loadProjectAllocations(
     }
   })
 }
+
+// Lädt Projekt-Allocations über ein WeekRef-Fenster (jahreswechsel-sicher, 6B-0).
+// Ersetzt für die navigierbare Zeitachse den einjährigen loadProjectAllocations-
+// Aufruf: filtert serverseitig grob über alle vorkommenden Jahre + KWs des
+// Fensters und danach exakt auf die (year, week)-Paare. Gibt year mit zurück.
+export async function loadProjectAllocationsForWindow(
+  projectId: string,
+  window: { year: number; week: number }[]
+): Promise<{ employee_id: string; lph_number: number; calendar_week: number; year: number; allocated_hours: number; source: string }[]> {
+  if (!projectId || window.length === 0) return []
+
+  const supabase = await createClient()
+  const years = [...new Set(window.map((w) => w.year))]
+  const weeks = [...new Set(window.map((w) => w.week))]
+  const pairSet = new Set(window.map((w) => `${w.year}-${w.week}`))
+
+  const { data, error } = await supabase
+    .from('allocations')
+    .select(`
+      employee_id,
+      calendar_week,
+      year,
+      allocated_hours,
+      source,
+      project_lph_budgets ( lph_number )
+    `)
+    .eq('project_id', projectId)
+    .in('year', years)
+    .in('calendar_week', weeks)
+
+  if (error) throw new Error(error.message)
+
+  return (data ?? [])
+    .map((a) => {
+      const lph = extractLph(a.project_lph_budgets as LphRow)
+      return {
+        employee_id: a.employee_id as string,
+        lph_number: lph?.lph_number ?? 0,
+        calendar_week: a.calendar_week as number,
+        year: a.year as number,
+        allocated_hours: a.allocated_hours as number,
+        source: a.source as string,
+      }
+    })
+    .filter((a) => pairSet.has(`${a.year}-${a.calendar_week}`))
+}
