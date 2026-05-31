@@ -529,6 +529,31 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const utilizationPct = totalBudget > 0 ? Math.min(100, Math.round(totalAllocated / totalBudget * 100)) : 0
   const progressColor = utilizationPct > 85 ? 'bg-red-400' : utilizationPct > 60 ? 'bg-amber-400' : 'bg-emerald-400'
 
+  // ── Soll-Rollenbedarf (6B-2C, read-only) ────────────────────────────────────
+  // Reine Planungswerte, abgeleitet aus LPH-Budget (project_lph_budgets.budget_eur)
+  // + Rollenverteilung + interner Planungssatz (planning_roles.rate_eur_per_hour).
+  // KEINE allocations, KEINE Mitarbeiterdaten, KEIN hourly_rate_eur.
+  //   rollen_budget = budget * share_pct / 100
+  //   soll_stunden  = rollen_budget / rate   (rate <= 0 -> null)
+  //   h/Woche       = soll_stunden / wochen  (kein Balken -> null)
+  // Wochen aus dem LPH-Balken (start_kw..end_kw, inklusive). Reaktiv: Drag/Resize
+  // des Balkens aktualisiert activeSchedule -> Werte rechnen sich automatisch neu.
+  const lphWeeks =
+    activeSchedule?.start_kw != null && activeSchedule?.end_kw != null
+      ? activeSchedule.end_kw - activeSchedule.start_kw + 1
+      : null
+
+  const sollRows = planRoles
+    .map((r) => {
+      const pct = parseSharePct(rpShares[r.id])
+      const rollenBudget = totalBudget * pct / 100
+      const rate = r.rate_eur_per_hour
+      const sollStunden = rate > 0 ? rollenBudget / rate : null
+      const hProWoche = sollStunden != null && lphWeeks && lphWeeks > 0 ? sollStunden / lphWeeks : null
+      return { id: r.id, name: r.name, pct, rate, rollenBudget, sollStunden, hProWoche }
+    })
+    .filter((row) => row.pct > 0)
+
   function commitEdit(empId: string, kw: number, value: string) {
     if (activeLph == null) { setEditCell(null); return }
     const hours = Math.max(0, Math.min(60, parseFloat(value) || 0))
@@ -706,6 +731,63 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                 <p className="text-[10px] text-slate-400">
                   Soll-/Planungsmodell · keine echten Mitarbeiterzuweisungen, keine Mitarbeiter-Stundensätze.
                 </p>
+
+                {/* ── Soll-Rollenbedarf (read-only, 6B-2C) ── */}
+                <div className="pt-2 border-t border-slate-100">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Soll-Rollenbedarf</p>
+                    <span className="text-[10px] text-slate-400">
+                      {lphWeeks ? `${lphWeeks} Wo` : 'kein Balken'} · {totalBudget > 0 ? fmtEur(totalBudget) : 'kein Budget'}
+                    </span>
+                  </div>
+
+                  {totalBudget <= 0 ? (
+                    <p className="text-[11px] text-slate-400 py-1">Kein LPH-Budget vorhanden.</p>
+                  ) : sollRows.length === 0 ? (
+                    <p className="text-[11px] text-slate-400 py-1">Noch keine Rollenverteilung gepflegt.</p>
+                  ) : (
+                    <>
+                      <div className="rounded-lg border border-slate-200 overflow-hidden">
+                        <div className="flex items-center bg-slate-50 px-2.5 py-1 border-b border-slate-100 text-[9px] font-semibold text-slate-400 uppercase tracking-wide">
+                          <span className="flex-1">Rolle</span>
+                          <span className="w-10 text-right">%</span>
+                          <span className="w-14 text-right">€/h</span>
+                          <span className="w-20 text-right">Budget</span>
+                          <span className="w-14 text-right">Soll h</span>
+                          <span className="w-16 text-right">h/Wo</span>
+                        </div>
+                        <div className="divide-y divide-slate-100">
+                          {sollRows.map((row) => (
+                            <div key={row.id} className="flex items-center px-2.5 py-1 text-[11px] text-slate-700 tabular-nums">
+                              <span className="flex-1 truncate">{row.name}</span>
+                              <span className="w-10 text-right">{Math.round(row.pct * 10) / 10}</span>
+                              {row.rate > 0 ? (
+                                <>
+                                  <span className="w-14 text-right">{fmtEur(row.rate)}</span>
+                                  <span className="w-20 text-right">{fmtEur(row.rollenBudget)}</span>
+                                  <span className="w-14 text-right">{row.sollStunden != null ? `${Math.round(row.sollStunden * 10) / 10} h` : '—'}</span>
+                                  <span className="w-16 text-right">{row.hProWoche != null ? `${Math.round(row.hProWoche * 10) / 10} h` : '—'}</span>
+                                </>
+                              ) : (
+                                <span className="flex-1 text-right text-amber-600">kein Planungssatz</span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      {rpSum !== 100 && (
+                        <p className="mt-1 text-[10px] text-amber-600">
+                          Summe ist nicht 100 % — Rest ist unverplant bzw. überplant.
+                        </p>
+                      )}
+                      {lphWeeks == null && (
+                        <p className="mt-1 text-[10px] text-slate-400">
+                          Kein Terminbalken gesetzt — „h/Wo" wird erst mit Balken berechnet.
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
             )}
           </div>
