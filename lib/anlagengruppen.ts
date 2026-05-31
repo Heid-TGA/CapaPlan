@@ -43,6 +43,19 @@ export function gewerkForAg(ag: number): Gewerk | null {
   return null
 }
 
+// Gewerkbudgets aus einer AG-Budget-Tabelle (ag_number -> budget_eur):
+//   HLKS = AG 1 + AG 2 + AG 3   ·   Elektro = AG 4 + AG 5
+// Fehlende/undefinierte AGs zaehlen als 0. Reine Aggregation der in Paket 10.1
+// gespeicherten AG-Budgets — KEINE neue Budgetquelle, KEIN Abacus-/LPH-Zugriff.
+export function gewerkBudgetsFromAg(
+  budgetByAg: Record<number, number>
+): Record<Gewerk, number> {
+  return {
+    HLKS: HLKS_AGS.reduce((s, ag) => s + (budgetByAg[ag] ?? 0), 0),
+    Elektro: ELEKTRO_AGS.reduce((s, ag) => s + (budgetByAg[ag] ?? 0), 0),
+  }
+}
+
 // Label einer AG-Nummer (Fallback "AG n", falls ausserhalb 1–5).
 export function agLabel(ag: number): string {
   return ANLAGENGRUPPEN.find((a) => a.ag === ag)?.label ?? `AG ${ag}`

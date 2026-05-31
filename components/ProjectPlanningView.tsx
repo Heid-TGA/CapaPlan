@@ -22,9 +22,9 @@ import {
   type AgBudget, type BudgetSourceType,
 } from '@/app/actions/project-budget-source'
 import { loadHoaiScenarios, type HoaiScenario } from '@/app/actions/hoai-scenarios'
-import { calcHoaiDummy } from '@/lib/hoai-dummy'
+import { calcHoaiDummy, HOAI_DUMMY_LPH_SPLIT } from '@/lib/hoai-dummy'
 import {
-  ANLAGENGRUPPEN, GEWERK_GROUPS, AG_NUMBERS, HLKS_AGS, ELEKTRO_AGS,
+  ANLAGENGRUPPEN, GEWERK_GROUPS, AG_NUMBERS, gewerkBudgetsFromAg,
   HOAI_DUMMY_AG_SPLIT_SUM,
 } from '@/lib/anlagengruppen'
 
@@ -726,9 +726,12 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // AG-Summe + Gewerk-Aggregation aus den geladenen AG-Budgets.
   const agBudgetTotal = AG_NUMBERS.reduce((s, ag) => s + (agBudgets[ag]?.budget_eur ?? 0), 0)
   const hasAgBudgets = AG_NUMBERS.some((ag) => agBudgets[ag] != null)
-  const hlksBudget = HLKS_AGS.reduce((s, ag) => s + (agBudgets[ag]?.budget_eur ?? 0), 0)
-  const elektroBudget = ELEKTRO_AGS.reduce((s, ag) => s + (agBudgets[ag]?.budget_eur ?? 0), 0)
-  const gewerkBudgetByName: Record<string, number> = { HLKS: hlksBudget, Elektro: elektroBudget }
+  // 10.2: Gewerkbudgets (HLKS = AG 1–3, Elektro = AG 4–5) zentral aus lib ableiten.
+  const budgetByAg: Record<number, number> = {}
+  for (const ag of AG_NUMBERS) budgetByAg[ag] = agBudgets[ag]?.budget_eur ?? 0
+  const gewerkBudgetByName = gewerkBudgetsFromAg(budgetByAg)
+  const hlksBudget = gewerkBudgetByName.HLKS
+  const elektroBudget = gewerkBudgetByName.Elektro
   // Live-Summe der manuellen Eingaben (Anzeige im Manual-Modal).
   const manualSum = AG_NUMBERS.reduce((s, ag) => s + parseEurInput(manualInputs[ag]), 0)
 
@@ -890,6 +893,59 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       }
     }
     sollByLph[s.lph_id] = soll
+  }
+
+  // ── 10.2: Gewerk-Sollstunden (AG-Budget × LPH-Verteilung × Rollen) ──────────
+  // Reiner Planungs-/Kalkulationslayer. KEINE Mitarbeiterzuweisung, KEIN
+  // employees.hourly_rate_eur. Schreibt NICHT in project_lph_budgets.
+  //   Gewerkbudget (HLKS = AG 1–3, Elektro = AG 4–5)
+  //   → je LPH 1–9 über die HOAI-Dummy-LPH-Prozente (lib/hoai-dummy.ts) verteilt
+  //   → je LPH Rollenverteilung (lph_role_plan, area_id null) bevorzugt, sonst
+  //     Default-Gruppe (lph_1_5/6_7/8_9), sonst keine -> 0/„— h"
+  //   → Stunden = lph_budget × share_pct/100 ÷ planning_roles.rate_eur_per_hour.
+  // Die LPH-Verteilung gilt zunächst gleich für HLKS und Elektro.
+
+  // Rollenanteile je LPH-NUMMER (own bevorzugt, sonst Default) -> [{pct, rate}].
+  // Identisch für beide Gewerke -> einmal vorberechnen (kein N+1).
+  function roleSharesForLphNumber(lphNumber: number): { pct: number; rate: number }[] {
+    const own: { pct: number; rate: number }[] = []
+    for (const sc of schedules) {
+      if (sc.lph_number !== lphNumber) continue
+      for (const r of rolePlans) {
+        if (r.lph_id === sc.lph_id && r.area_id === null && r.share_pct > 0) {
+          own.push({ pct: r.share_pct, rate: r.role_rate_eur_per_hour })
+        }
+      }
+    }
+    if (own.length > 0) return own
+    const grp = groupKeyForLph(lphNumber)
+    const defs = grp ? defaultPctByGroup[grp] : undefined
+    if (!defs) return []
+    const out: { pct: number; rate: number }[] = []
+    for (const [roleId, pct] of defs) out.push({ pct, rate: roleRateById.get(roleId) ?? 0 })
+    return out
+  }
+  const roleSharesByLph = new Map<number, { pct: number; rate: number }[]>()
+  for (const { lph } of HOAI_DUMMY_LPH_SPLIT) roleSharesByLph.set(lph, roleSharesForLphNumber(lph))
+
+  // Sollstunden eines Gewerkbudgets über alle LPH. hasDistribution = mind. ein
+  // Rollenanteil mit positivem Planungssatz -> sonst „— h" (kein Crash).
+  function gewerkSollHours(gewerkBudget: number): { hours: number; hasDistribution: boolean } {
+    if (gewerkBudget <= 0) return { hours: 0, hasDistribution: false }
+    let hours = 0
+    let hasDistribution = false
+    for (const { lph, pct } of HOAI_DUMMY_LPH_SPLIT) {
+      const lphBudget = gewerkBudget * pct / 100
+      if (lphBudget <= 0) continue
+      for (const s of roleSharesByLph.get(lph) ?? []) {
+        if (s.pct > 0 && s.rate > 0) { hours += lphBudget * s.pct / 100 / s.rate; hasDistribution = true }
+      }
+    }
+    return { hours, hasDistribution }
+  }
+  const gewerkSollByName: Record<string, { hours: number; hasDistribution: boolean }> = {
+    HLKS: gewerkSollHours(hlksBudget),
+    Elektro: gewerkSollHours(elektroBudget),
   }
 
   // IST: Mitarbeiterstunden je KW werden gleichmäßig auf die in dieser KW aktiven,
@@ -1334,26 +1390,31 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
             <p className="text-[10px] text-slate-400 mt-1.5">Noch keine AG-Budgetdaten hinterlegt.</p>
           )}
         </div>
-        {/* 10.1: Rechte Karte — Gewerkbudgets aus AG-Budgets (HLKS = AG 1–3,
-            Elektro = AG 4–5). Budget echt; Sollstunden bewusst „— h"
-            (AG→LPH→Rollen-Verteilung folgt in einem Folgepaket). */}
+        {/* 10.2: Rechte Karte — Gewerkbudgets (HLKS = AG 1–3, Elektro = AG 4–5)
+            aus project_ag_budgets + rechnerische Sollstunden aus AG-Budget ×
+            LPH-Verteilung × Rollenverteilung. Reine Sollwerte, KEINE Zuweisung. */}
         <div className="bg-white rounded-xl border border-slate-200 p-4">
           <div className="flex items-center gap-2 mb-2"><Clock className="h-3.5 w-3.5 text-slate-300" /><p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Budget &amp; Sollstunden nach Gewerk</p></div>
           <div className="space-y-2">
             {GEWERK_GROUPS.map(g => {
               const budget = gewerkBudgetByName[g.name] ?? 0
+              const soll = gewerkSollByName[g.name]
+              const showHours = hasAgBudgets && budget > 0 && soll.hasDistribution
               return (
                 <div key={g.name} className="flex items-center justify-between gap-2">
                   <span className="text-sm text-slate-600">{g.name} <span className="text-[10px] text-slate-400">· {g.span}</span></span>
-                  <span className="text-right">
-                    <span className={`block text-sm font-semibold tabular-nums ${hasAgBudgets ? 'text-slate-700' : 'text-slate-300'}`}>{hasAgBudgets ? fmtEur(budget) : '—'}</span>
-                    <span className="block text-[10px] text-slate-300 tabular-nums">— h</span>
+                  <span className="flex items-baseline gap-3 text-right tabular-nums">
+                    <span className={`text-sm font-semibold ${hasAgBudgets ? 'text-slate-700' : 'text-slate-300'}`}>{hasAgBudgets ? fmtEur(budget) : '—'}</span>
+                    <span className={`w-14 text-sm font-semibold ${showHours ? 'text-slate-700' : 'text-slate-300'}`}>{showHours ? `${Math.round(soll.hours)} h` : '— h'}</span>
                   </span>
                 </div>
               )
             })}
           </div>
-          <p className="text-[10px] text-slate-400 mt-1.5">Sollstunden je Gewerk folgen (AG→LPH-Verteilung in einem separaten Paket).</p>
+          {hasAgBudgets && GEWERK_GROUPS.some(g => (gewerkBudgetByName[g.name] ?? 0) > 0 && !gewerkSollByName[g.name].hasDistribution) && (
+            <p className="text-[10px] text-amber-600 mt-1.5">„— h": keine Rollen-/Default-Verteilung oder kein Planungssatz hinterlegt.</p>
+          )}
+          <p className="text-[10px] text-slate-400 mt-1.5">Sollstunden aus AG-Budget × LPH-Verteilung × Rollenverteilung — rechnerische Sollwerte, keine Mitarbeiterzuweisung.</p>
         </div>
       </div>
 
