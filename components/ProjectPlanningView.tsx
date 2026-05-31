@@ -9,7 +9,7 @@ import { loadExternalTrades, createExternalTrade, deleteExternalTrade, type Exte
 import { updateProjectCalcProfile } from '@/app/actions/project-settings'
 import { loadPlanningRoles, type PlanningRole } from '@/app/actions/planning-roles'
 import { loadLphRolePlan, saveLphRolePlan, loadProjectRolePlans, type LphRoleShare } from '@/app/actions/lph-role-plan'
-import { loadProjectBudgetAreas, type BudgetArea } from '@/app/actions/budget-areas'
+import { loadProjectBudgetAreas, ensureDefaultBudgetAreas, type BudgetArea } from '@/app/actions/budget-areas'
 import { getDefaultGroupForLph, loadRolePlanDefaults, type RolePlanDefault } from '@/app/actions/role-plan-defaults'
 import { groupKeyForLph, ROLE_PLAN_DEFAULT_GROUP_LABELS } from '@/lib/role-plan-defaults'
 import { ALL_LPH, LPH_LABELS } from '@/lib/planning-phases'
@@ -81,7 +81,9 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const [selectedLph, setSelectedLph] = useState<number | null>(null)
   const [visibleLph, setVisibleLph] = useState<Set<number>>(new Set())
   const [showLphPicker, setShowLphPicker] = useState(false)
-  const [lphBudgets, setLphBudgets] = useState<Record<number, LphBudget>>({})
+  // 8E: Budgetstatus je LPH-Zeile bereichsstabil über die echte lph_id (UUID)
+  // geschlüsselt — sonst überschreibt ELT LPH 5 den Status von HLKS LPH 5.
+  const [lphBudgets, setLphBudgets] = useState<Record<string, LphBudget>>({})
   const [allocations, setAllocations] = useState<AllocMap>({})
   const [editCell, setEditCell] = useState<{ empId: string; kw: number } | null>(null)
   const [showDummies, setShowDummies] = useState(true)
@@ -126,7 +128,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
   // Rollenverteilung je LPH (6B-2B) — reines Soll-/Planungsmodell.
   // KEINE Mitarbeiterzuweisung, kein allocations-Schreibpfad, keine Stundensaetze
-  // von Mitarbeitenden. Nutzt die echte lph_id (UUID), nicht primaryLphId.
+  // von Mitarbeitenden. Nutzt die echte lph_id (UUID) der aktiven LPH-Zeile.
   // 7D: Rollenverteilung klappt direkt unter der jeweiligen LPH-Zeile auf.
   // Nur eine LPH gleichzeitig; immer an die aktive LPH gekoppelt.
   const [expandedLph, setExpandedLph] = useState<number | null>(null)
@@ -138,6 +140,12 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // LPH noch keine eigene Verteilung hat). Reine Vorlagen, keine allocations.
   const [rolePlanDefaults, setRolePlanDefaults] = useState<RolePlanDefault[]>([])
   const [rpAreaId, setRpAreaId] = useState<string>('') // '' = Gesamt / ohne Bereich
+  // 8E: aktiver TGA-Budgetbereich der Projektplanung (Bereichsumschalter).
+  // null = Gesamt / ohne Bereich (= bisheriges, bereichsloses Verhalten; auch
+  // Träger der Abacus-/Alt-Budgets, die area_id = null haben).
+  const [selectedAreaId, setSelectedAreaId] = useState<string | null>(null)
+  const [seedingAreas, setSeedingAreas] = useState(false)
+  const [seedError, setSeedError] = useState<string | null>(null)
   const [rpShares, setRpShares] = useState<Record<string, string>>({}) // roleId -> %-String
   const [rpLoading, setRpLoading] = useState(false)
   const [rpSaving, setRpSaving] = useState(false)
@@ -169,11 +177,13 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // mehrdeutig. Quelle der lph_ids sind die geladenen Terminplan-Schedules.
   // Schlägt der id-basierte RPC fehl (z. B. Patch 8C noch nicht ausgeführt), wird
   // die betroffene LPH einfach übersprungen (try/catch) — kein Crash.
-  // Keying weiterhin per lph_number (bereichslose Projekte: pro Nummer genau eine Zeile).
-  async function fetchLphBudgets(schedules: LphSchedule[]): Promise<Record<number, LphBudget>> {
-    const map: Record<number, LphBudget> = {}
+  // 8E: Keying per lph_id (UUID) — bereichsstabil über alle Bereiche eines
+  // Projekts. Geladen werden ALLE LPH-Zeilen (alle Bereiche), damit die
+  // Projektbudgetkarte projektweit summieren kann.
+  async function fetchLphBudgets(schedules: LphSchedule[]): Promise<Record<string, LphBudget>> {
+    const map: Record<string, LphBudget> = {}
     for (const s of schedules) {
-      try { const b = await getLphBudgetStatusById(s.lph_id); if (b) map[s.lph_number] = b } catch {}
+      try { const b = await getLphBudgetStatusById(s.lph_id); if (b) map[s.lph_id] = b } catch {}
     }
     return map
   }
@@ -183,8 +193,9 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     const map: AllocMap = {}
     const lphWithHours = new Set<number>()
     for (const a of data) {
-      const lphId = `${project.id}_lph${a.lph_number}`
-      const key = `${a.employee_id}_${lphId}`
+      // 8E: bereichsstabiler Key über die echte lph_id (UUID) statt synthetischer
+      // (project,lph_number)-Key. lphWithHours bleibt nummernbasiert (Default-Sicht).
+      const key = `${a.employee_id}_${a.lph_id}`
       if (!map[key]) map[key] = {}
       map[key][a.calendar_week] = { hours: a.allocated_hours, source: a.source as 'H&I' | 'Manuell_PL' }
       if (a.allocated_hours > 0) lphWithHours.add(a.lph_number)
@@ -253,8 +264,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
         if (cancelled) return
         const map: AllocMap = {}
         for (const a of data) {
-          const lphId = `${project.id}_lph${a.lph_number}`
-          const key = `${a.employee_id}_${lphId}`
+          const key = `${a.employee_id}_${a.lph_id}`
           if (!map[key]) map[key] = {}
           map[key][a.calendar_week] = { hours: a.allocated_hours, source: a.source as 'H&I' | 'Manuell_PL' }
         }
@@ -272,6 +282,8 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // Aktuelles Profil des gewaehlten Projekts (lokaler Override, sonst 'frei').
   const currentProfile: CalcProfile =
     selectedProject ? (profileByProject[selectedProject.id] ?? 'frei') : 'frei'
+  // 8E: Nur TGA-Projekte arbeiten nach Budgetbereichen (HLKS/ELT/Sonstige).
+  const isTga = currentProfile === 'TGA'
 
   async function handleProfileChange(value: string) {
     if (!selectedProject || !isCalcProfile(value)) return
@@ -298,21 +310,63 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     }
   }
 
+  // ── Bereichsumschalter (8E) ─────────────────────────────────────────────────
+  // Wechselt den aktiven TGA-Budgetbereich. selectedLph wird zurückgesetzt, damit
+  // die aktive LPH auf die erste sichtbare Zeile des neuen Bereichs fällt.
+  function selectArea(id: string | null) {
+    setSelectedAreaId(id)
+    setSelectedLph(null)
+    setExpandedLph(null)
+    setShowLphPicker(false)
+    setShowMsForm(false)
+  }
+
+  // Legt die Standard-Budgetbereiche (HLKS/ELT/Sonstige) für das TGA-Projekt an
+  // (idempotent, bestehende Bereiche bleiben). Danach Default auf HLKS.
+  async function handleSeedAreas() {
+    if (!selectedProject || seedingAreas) return
+    setSeedingAreas(true); setSeedError(null)
+    try {
+      const res = await ensureDefaultBudgetAreas(selectedProject.id)
+      if (res.success) {
+        setPlanAreas(res.data)
+        const hlks = res.data.find(a => a.name === 'HLKS')
+        const elt = res.data.find(a => a.name === 'ELT')
+        setSelectedAreaId(hlks?.id ?? elt?.id ?? res.data[0]?.id ?? null)
+      } else {
+        setSeedError(res.message || 'Bereiche konnten nicht angelegt werden')
+      }
+    } catch (e) {
+      setSeedError(e instanceof Error ? e.message : 'Bereiche konnten nicht angelegt werden')
+    } finally {
+      setSeedingAreas(false)
+    }
+  }
+
   // ── Abgeleitete Werte ────────────────────────────────────────────────────────
 
-  // Verfügbare (budgetierte) LPH = solche mit project_lph_budgets-Zeile (echte lph_id).
-  const availableLph = new Set(schedules.map(s => s.lph_number))
-  const visibleSorted = schedules
+  // 8E: aktiver Bereich. TGA nutzt den gewählten Bereich, Nicht-TGA immer null
+  // (= bisheriges, bereichsloses Verhalten). null deckt zugleich die Abacus-/
+  // Alt-Zeilen (area_id = null) ab → diese bleiben über "Gesamt" erreichbar.
+  const effectiveAreaId = isTga ? selectedAreaId : null
+  // Nur die LPH-Zeilen des aktiven Bereichs anzeigen — keine Vermischung HLKS/ELT
+  // in derselben Ansicht. Innerhalb EINES Bereichs ist lph_number wieder eindeutig.
+  const areaSchedules = schedules.filter(s => (s.area_id ?? null) === effectiveAreaId)
+
+  // Verfügbare (budgetierte) LPH dieses Bereichs = solche mit project_lph_budgets-Zeile.
+  const availableLph = new Set(areaSchedules.map(s => s.lph_number))
+  const visibleSorted = areaSchedules
     .filter(s => visibleLph.has(s.lph_number))
     .sort((a, b) => a.lph_number - b.lph_number)
 
-  // Effektiv aktive LPH (fällt auf erste sichtbare zurück, falls Auswahl ausgeblendet).
-  const activeLph = (selectedLph != null && visibleLph.has(selectedLph))
+  // Effektiv aktive LPH (fällt auf erste sichtbare zurück, falls Auswahl im
+  // aktuellen Bereich nicht existiert oder ausgeblendet ist).
+  const activeLph = (selectedLph != null && visibleLph.has(selectedLph) && availableLph.has(selectedLph))
     ? selectedLph
     : (visibleSorted[0]?.lph_number ?? null)
-  const activeSchedule = activeLph != null ? schedules.find(s => s.lph_number === activeLph) ?? null : null
-  const primaryLphId = activeLph != null ? `${selectedProject?.id}_lph${activeLph}` : ''
-  // Echte LPH-UUID (aus project_lph_budgets) — Pflicht fuer lph_role_plan.
+  const activeSchedule = activeLph != null ? areaSchedules.find(s => s.lph_number === activeLph) ?? null : null
+  // Echte LPH-UUID (aus project_lph_budgets) — Pflicht fuer lph_role_plan, Gantt,
+  // Meilensteine, Budgetstatus und Matrix-Carrier. Trägt implizit den Bereich.
   const realLphId = activeSchedule?.lph_id ?? null
 
   // ── Rollenverteilung (6B-2B) ────────────────────────────────────────────────
@@ -320,13 +374,25 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   useEffect(() => {
     const pid = selectedProject?.id
     setRpAreaId(''); setRpSavedMsg(null); setRpError(null)
+    setSelectedAreaId(null); setSeedError(null)
     if (!pid) { setPlanRoles([]); setPlanAreas([]); return }
     let cancelled = false
     Promise.all([loadPlanningRoles(), loadProjectBudgetAreas(pid)])
       .then(([rolesRes, areasRes]) => {
         if (cancelled) return
         setPlanRoles(rolesRes.success ? rolesRes.data.filter(r => r.active) : [])
-        setPlanAreas(areasRes.success ? areasRes.data : [])
+        const areas = areasRes.success ? areasRes.data : []
+        setPlanAreas(areas)
+        // 8E: Default-Bereich nur für TGA. Bevorzugt HLKS, sonst ELT, sonst null
+        // (Gesamt). Nicht-TGA bleibt bereichslos (null).
+        const prof = profileByProject[pid] ?? 'frei'
+        if (prof === 'TGA') {
+          const hlks = areas.find(a => a.name === 'HLKS')
+          const elt = areas.find(a => a.name === 'ELT')
+          setSelectedAreaId(hlks?.id ?? elt?.id ?? null)
+        } else {
+          setSelectedAreaId(null)
+        }
       })
       .catch(() => { if (!cancelled) { setPlanRoles([]); setPlanAreas([]) } })
     return () => { cancelled = true }
@@ -421,27 +487,33 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const rpSumRounded = Math.round(rpSum * 10) / 10
 
   async function toggleLph(n: number) {
-    // Abwählen: nur aus der sichtbaren Liste nehmen — KEINE DB-Zeile / Allocations /
-    // Meilensteine / Terminbalken löschen.
-    if (visibleLph.has(n)) {
-      setVisibleLph(prev => { const next = new Set(prev); next.delete(n); return next })
-      return
-    }
-    // Bereits budgetiert (echte lph_id vorhanden): nur einblenden, keine neue DB-Zeile.
+    // 8E: zuerst BEREICHSBEZOGEN prüfen, ob die LPH-Zeile im aktuellen Bereich
+    // existiert (availableLph ist bereichsgefiltert). So meint "LPH 5 anzeigen"
+    // auf dem ELT-Tab niemals die HLKS-Zeile.
     if (availableLph.has(n)) {
-      setVisibleLph(prev => new Set(prev).add(n))
-      setSelectedLph(n)
+      // Nur clientseitig ein-/ausblenden — KEINE DB-Zeile / Allocations /
+      // Meilensteine / Terminbalken löschen.
+      if (visibleLph.has(n)) {
+        setVisibleLph(prev => { const next = new Set(prev); next.delete(n); return next })
+      } else {
+        setVisibleLph(prev => new Set(prev).add(n))
+        setSelectedLph(n)
+      }
       return
     }
-    // LPH ohne Budget: idempotent eine 0-Euro-Zeile anlegen, dann einblenden.
+    // LPH ohne Budget: idempotent eine 0-Euro-Zeile IM AKTUELLEN BEREICH anlegen,
+    // dann einblenden. Bei TGA -> selectedAreaId (HLKS/ELT/…), sonst null. So
+    // betrifft "HLKS LPH 5 hinzufügen" nur HLKS LPH 5, nicht ELT LPH 5.
     if (!selectedProject || addingLph != null) return
     setAddingLph(n)
     try {
-      const res = await ensureLphBudgetRow(selectedProject.id, n)
+      const res = await ensureLphBudgetRow(selectedProject.id, n, effectiveAreaId)
       if (!res.success || !res.row) { console.error('ensureLphBudgetRow:', res.message); return }
       const row = res.row
-      setSchedules(prev => prev.some(s => s.lph_number === row.lph_number)
-        ? prev.map(s => (s.lph_number === row.lph_number ? row : s))
+      // Upsert in den lokalen State über (lph_number UND area_id) — niemals eine
+      // gleichnamige LPH eines anderen Bereichs überschreiben.
+      setSchedules(prev => prev.some(s => s.lph_number === row.lph_number && (s.area_id ?? null) === (row.area_id ?? null))
+        ? prev.map(s => (s.lph_number === row.lph_number && (s.area_id ?? null) === (row.area_id ?? null) ? row : s))
         : [...prev, row])
       setVisibleLph(prev => new Set(prev).add(n))
       setSelectedLph(n)
@@ -449,7 +521,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       // eindeutig über die neue lph_id der gerade sichergestellten Zeile (Paket 8D).
       try {
         const b = await getLphBudgetStatusById(row.lph_id)
-        if (b) setLphBudgets(prev => ({ ...prev, [n]: b }))
+        if (b) setLphBudgets(prev => ({ ...prev, [row.lph_id]: b }))
       } catch { /* 0-Euro-LPH oder Patch 8C noch nicht ausgeführt: Budgetkarte greift auf totalBudget>0-Guard zurück */ }
     } catch (e) {
       console.error(e)
@@ -485,7 +557,8 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // ── Meilenstein-MVP ──────────────────────────────────────────────────────────
 
   function openMsForm() {
-    const sorted = [...schedules].sort((a, b) => a.lph_number - b.lph_number)
+    // Nur LPH-Zeilen des aktiven Bereichs — Meilenstein hängt an genau dieser lph_id.
+    const sorted = [...areaSchedules].sort((a, b) => a.lph_number - b.lph_number)
     setMsDesc('')
     setMsDate('')
     setMsLph(activeLph != null && availableLph.has(activeLph) ? activeLph : (sorted[0]?.lph_number ?? null))
@@ -503,8 +576,8 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     const parsed = new Date(`${msDate}T00:00:00Z`)
     if (Number.isNaN(parsed.getTime())) { setMsError('Datum ungültig'); return }
     const { year, week: kw } = isoWeekOf(parsed) // ISO-Jahr, NICHT getFullYear()
-    const sched = schedules.find(s => s.lph_number === msLph)
-    if (!sched) { setMsError('LPH ohne Budget'); return }   // nur LPH mit vorhandener lph_id
+    const sched = areaSchedules.find(s => s.lph_number === msLph)
+    if (!sched) { setMsError('LPH ohne Budget'); return }   // nur LPH mit vorhandener lph_id (im aktiven Bereich)
     setMsSaving(true); setMsError(null)
     try {
       // msDate (ISO yyyy-mm-dd) wird zusätzlich als exaktes Datum gespeichert;
@@ -633,23 +706,21 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   function getHours(empId: string, lphId: string, kw: number) { return allocations[allocKey(empId, lphId)]?.[kw]?.hours ?? 0 }
   function getSource(empId: string, lphId: string, kw: number) { return allocations[allocKey(empId, lphId)]?.[kw]?.source }
 
-  // Synthetischer Client-Key einer LPH-Nummer (identisch zu fetchAllocations).
-  function lphKey(n: number) { return `${selectedProject?.id}_lph${n}` }
-
   // ── Projektbezogene Matrix (6B-2D) ──────────────────────────────────────────
   // Die Matrix-Zelle bedeutet MITARBEITER + PROJEKT + KW (LPH-unabhängig): Summe
-  // der Stunden über ALLE LPH dieses Projekts. Dadurch ändert sich der Wert NICHT,
-  // wenn links eine andere LPH ausgewählt wird. Die LPH-Zuordnung für IST/SOLL
-  // erfolgt separat, rein rechnerisch über die zeitliche Lage der LPH-Balken.
+  // der Stunden über ALLE LPH dieses Projekts (alle Bereiche). Dadurch ändert sich
+  // der Wert NICHT, wenn links eine andere LPH/ein anderer Bereich gewählt wird.
+  // 8E: Summiert über die echten lph_id (UUID) je Zeile — bereichsstabil und ohne
+  // Doppelzählung, auch wenn HLKS LPH 5 und ELT LPH 5 beide existieren.
   function getProjectHours(empId: string, kw: number) {
-    return schedules.reduce((s, sc) => s + getHours(empId, lphKey(sc.lph_number), kw), 0)
+    return schedules.reduce((s, sc) => s + getHours(empId, sc.lph_id, kw), 0)
   }
   // Repräsentative Quelle für die Zellfarbe: Manuell hat Vorrang vor H&I.
   function getProjectSource(empId: string, kw: number): 'H&I' | 'Manuell_PL' | undefined {
     let hasHI = false, hasManual = false
     for (const sc of schedules) {
-      if (getHours(empId, lphKey(sc.lph_number), kw) <= 0) continue
-      const src = getSource(empId, lphKey(sc.lph_number), kw)
+      if (getHours(empId, sc.lph_id, kw) <= 0) continue
+      const src = getSource(empId, sc.lph_id, kw)
       if (src === 'Manuell_PL') hasManual = true
       else if (src === 'H&I') hasHI = true
     }
@@ -662,7 +733,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
   // ── Budget-Karten (auf aktive LPH bezogen) ─────────────────────────────────────
 
-  const activeBudget = activeLph != null ? lphBudgets[activeLph] : undefined
+  const activeBudget = realLphId ? lphBudgets[realLphId] : undefined
   const totalBudget = activeBudget?.budget_eur ?? 0
   const totalAllocated = activeBudget?.allocated_eur ?? 0
   const totalHours = activeBudget?.total_hours ?? 0
@@ -732,9 +803,11 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // Rollenverteilung (area_id = null, share>0). Hat eine LPH keine eigene
   // Verteilung, wird die passende DEFAULT-Gruppe als Fallback genutzt. rate ≤ 0
   // → Rolle trägt 0 bei (sauber abgefangen).
-  const sollByLph: Record<number, number> = {}
+  // 8E: per lph_id geschlüsselt (bereichsstabil). budget kommt aus dem id-basierten
+  // Budgetstatus dieser konkreten LPH-Zeile.
+  const sollByLph: Record<string, number> = {}
   for (const s of schedules) {
-    const budget = lphBudgets[s.lph_number]?.budget_eur ?? s.budget_eur ?? 0
+    const budget = lphBudgets[s.lph_id]?.budget_eur ?? s.budget_eur ?? 0
     if (budget <= 0) continue
     let soll = 0
     const own = rolePlans.filter(r => r.lph_id === s.lph_id && r.area_id === null && r.share_pct > 0)
@@ -752,7 +825,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
         }
       }
     }
-    sollByLph[s.lph_number] = soll
+    sollByLph[s.lph_id] = soll
   }
 
   // IST: Mitarbeiterstunden je KW werden gleichmäßig auf die in dieser KW aktiven,
@@ -760,7 +833,9 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // geladenen Matrix-Allocations → IST bezieht sich auf das sichtbare Fenster.
   // Keine aktive LPH in einer KW → die Stunden dieser KW werden keiner LPH
   // zugeordnet (übersprungen). Summen-erhaltend: Σ Anteile = Wochenstunden.
-  const istByLph: Record<number, number> = {}
+  // 8E: per lph_id geschlüsselt. „active" sind die sichtbaren Balken des aktiven
+  // Bereichs (visibleSorted ist bereits bereichsgefiltert).
+  const istByLph: Record<string, number> = {}
   for (const w of windowWeeks) {
     const active = visibleSorted.filter(s =>
       s.start_kw != null && s.end_kw != null &&
@@ -775,7 +850,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     }
     if (totalW === 0) continue
     const share = totalW / active.length
-    for (const s of active) istByLph[s.lph_number] = (istByLph[s.lph_number] ?? 0) + share
+    for (const s of active) istByLph[s.lph_id] = (istByLph[s.lph_id] ?? 0) + share
   }
 
   // Matrix-Speichern (6B-2D): Die Zelle ist projektbezogen (Mitarbeiter+Projekt+KW).
@@ -787,22 +862,25 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // Wichtig: Gespeichert wird über die ECHTE lph_id (UUID), nicht über den
   // synthetischen Client-Key.
   function commitEdit(empId: string, kw: number, value: string) {
-    if (activeLph == null || !selectedProject) { setEditCell(null); return }
+    if (activeLph == null || !selectedProject || !realLphId) { setEditCell(null); return }
     const hours = Math.max(0, Math.min(60, parseFloat(value) || 0))
-    const carrierKey = allocKey(empId, primaryLphId)
+    const carrierRealId = realLphId // aktive LPH-Zeile (trägt implizit den Bereich)
+    const carrierKey = allocKey(empId, carrierRealId)
     setEditCell(null)
 
-    // Andere LPH dieses Mitarbeiters/Projekts, die in dieser KW Stunden tragen.
-    const otherLphNums = schedules
-      .map(s => s.lph_number)
-      .filter(n => n !== activeLph && getHours(empId, lphKey(n), kw) > 0)
+    // 8E: Carrier-Strategie projektweit über echte lph_id (alle Bereiche). Andere
+    // LPH-Zeilen dieses (Mitarbeiter,KW), die Stunden tragen, werden auf 0 gesetzt
+    // → keine Doppelzählung im projektbezogenen Matrix-Wert.
+    const otherLphIds = schedules
+      .map(s => s.lph_id)
+      .filter(id => id !== carrierRealId && getHours(empId, id, kw) > 0)
 
     // Lokaler State: Carrier = volle Wochenstunden, alle anderen LPH = 0.
     setAllocations(prev => {
       const next: AllocMap = { ...prev }
       next[carrierKey] = { ...next[carrierKey], [kw]: { hours, source: 'Manuell_PL' } }
-      for (const n of otherLphNums) {
-        const k = allocKey(empId, lphKey(n))
+      for (const id of otherLphIds) {
+        const k = allocKey(empId, id)
         const prevSrc = next[k]?.[kw]?.source ?? 'Manuell_PL'
         next[k] = { ...next[k], [kw]: { hours: 0, source: prevSrc } }
       }
@@ -810,19 +888,16 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     })
 
     if (empId.startsWith('dummy-')) return
-    if (!realLphId) return // ohne echte lph_id kein DB-Write möglich
 
-    const carrierLphNum = activeLph
-    const carrierRealId = realLphId
     const yr = yearOfWeek(kw)
     const project = selectedProject
 
-    const applyBudget = (lphNum: number, res: { remaining_eur: number; utilization_pct: number } | null) => {
+    const applyBudget = (lphId: string, res: { remaining_eur: number; utilization_pct: number } | null) => {
       if (!res) return
       setLphBudgets(prev => {
-        const b = prev[lphNum]
+        const b = prev[lphId]
         if (!b) return prev
-        return { ...prev, [lphNum]: { ...b, remaining_eur: res.remaining_eur, utilization_pct: res.utilization_pct } }
+        return { ...prev, [lphId]: { ...b, remaining_eur: res.remaining_eur, utilization_pct: res.utilization_pct } }
       })
     }
 
@@ -830,13 +905,12 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       try {
         // 1) Carrier-LPH = volle projektbezogene Wochenstunden.
         const result = await upsertAllocation(project.id, carrierRealId, empId, kw, yr, hours)
-        applyBudget(carrierLphNum, result)
+        applyBudget(carrierRealId, result)
         // 2) Andere LPH dieser (Mitarbeiter,KW) auf 0 → keine Doppelzählung.
-        for (const n of otherLphNums) {
-          const realId = schedules.find(s => s.lph_number === n)?.lph_id
-          if (!realId || realId === carrierRealId) continue
-          const res2 = await upsertAllocation(project.id, realId, empId, kw, yr, 0)
-          applyBudget(n, res2)
+        for (const id of otherLphIds) {
+          if (id === carrierRealId) continue
+          const res2 = await upsertAllocation(project.id, id, empId, kw, yr, 0)
+          applyBudget(id, res2)
         }
       } catch (e) { console.error(e) }
     })
@@ -1042,6 +1116,33 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
         )}
       </div>
 
+      {/* ── Bereichsumschalter (8E): nur TGA-Projekte. Nicht-TGA bleibt schlank. ── */}
+      {selectedProject && isTga && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Bereich</span>
+          <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white p-0.5">
+            {/* Gesamt = area_id null (auch Träger der Abacus-/Alt-Budgets). */}
+            <button onClick={() => selectArea(null)}
+              className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${selectedAreaId === null ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+              Gesamt
+            </button>
+            {planAreas.map(a => (
+              <button key={a.id} onClick={() => selectArea(a.id)}
+                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${selectedAreaId === a.id ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+                {a.name}
+              </button>
+            ))}
+          </div>
+          {planAreas.length === 0 && (
+            <button onClick={handleSeedAreas} disabled={seedingAreas}
+              className="px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-slate-700 text-[11px] font-medium hover:bg-slate-50 transition-colors disabled:opacity-50">
+              {seedingAreas ? 'Anlegen…' : 'Standardbereiche anlegen'}
+            </button>
+          )}
+          {seedError && <span className="text-[10px] text-red-500" title={seedError}>Bereiche nicht angelegt</span>}
+        </div>
+      )}
+
       {/* HOAI-Dummy-Rechner (A2): isoliertes, rein lokales Szenario-Fenster. */}
       {showHoai && selectedProject && (
         <HoaiCalculatorModal projectId={selectedProject.id} projectName={selectedProject.name} onClose={() => setShowHoai(false)} />
@@ -1096,10 +1197,14 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                 <>
                   <div className="fixed inset-0 z-40" onClick={() => setShowLphPicker(false)} />
                   <div className="absolute left-0 top-full mt-2 z-50 w-80 bg-white rounded-xl border border-slate-200 shadow-xl p-2">
-                    <p className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-400">Leistungsphasen anzeigen</p>
+                    <p className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-400">
+                      Leistungsphasen anzeigen
+                      {isTga && <span className="ml-1 normal-case tracking-normal text-slate-400">· {selectedAreaId ? (planAreas.find(a => a.id === selectedAreaId)?.name ?? 'Bereich') : 'Gesamt'}</span>}
+                    </p>
                     {ALL_LPH.map(n => {
                       const available = availableLph.has(n)
-                      const checked = visibleLph.has(n)
+                      // checked nur, wenn die Zeile im AKTUELLEN Bereich existiert und sichtbar ist.
+                      const checked = available && visibleLph.has(n)
                       const busy = addingLph === n
                       return (
                         <label key={n}
@@ -1150,7 +1255,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                           <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Leistungsphase</label>
                           <select value={msLph ?? ''} onChange={e => setMsLph(Number(e.target.value))}
                             className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-slate-800 bg-white">
-                            {[...schedules].sort((a, b) => a.lph_number - b.lph_number).map(s => (
+                            {[...areaSchedules].sort((a, b) => a.lph_number - b.lph_number).map(s => (
                               <option key={s.lph_id} value={s.lph_number}>LPH {s.lph_number}: {LPH_LABELS[s.lph_number]}</option>
                             ))}
                           </select>
@@ -1230,8 +1335,8 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                       startKw={s.start_kw}
                       endKw={s.end_kw}
                       color={color}
-                      istHours={istByLph[s.lph_number] ?? 0}
-                      sollHours={sollByLph[s.lph_number] ?? 0}
+                      istHours={istByLph[s.lph_id] ?? 0}
+                      sollHours={sollByLph[s.lph_id] ?? 0}
                       onChange={(id, start, end, planYear) => {
                         setSchedules(prev => prev.map(sc =>
                           sc.lph_id === id ? { ...sc, start_kw: start, end_kw: end, plan_year: planYear } : sc

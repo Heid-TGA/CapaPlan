@@ -129,7 +129,7 @@ export async function loadProjectAllocations(
 export async function loadProjectAllocationsForWindow(
   projectId: string,
   window: { year: number; week: number }[]
-): Promise<{ employee_id: string; lph_number: number; calendar_week: number; year: number; allocated_hours: number; source: string }[]> {
+): Promise<{ employee_id: string; lph_id: string; lph_number: number; calendar_week: number; year: number; allocated_hours: number; source: string }[]> {
   if (!projectId || window.length === 0) return []
 
   const supabase = await createClient()
@@ -137,10 +137,14 @@ export async function loadProjectAllocationsForWindow(
   const weeks = [...new Set(window.map((w) => w.week))]
   const pairSet = new Set(window.map((w) => `${w.year}-${w.week}`))
 
+  // lph_id (echte UUID der project_lph_budgets-Zeile) wird mitgegeben, damit die
+  // Projektplanung Allocations bereichsstabil je LPH-Zeile schlüsseln kann
+  // (HLKS LPH 5 ≠ ELT LPH 5). lph_number bleibt für Anzeige-/Default-Logik erhalten.
   const { data, error } = await supabase
     .from('allocations')
     .select(`
       employee_id,
+      lph_id,
       calendar_week,
       year,
       allocated_hours,
@@ -158,6 +162,7 @@ export async function loadProjectAllocationsForWindow(
       const lph = extractLph(a.project_lph_budgets as LphRow)
       return {
         employee_id: a.employee_id as string,
+        lph_id: a.lph_id as string,
         lph_number: lph?.lph_number ?? 0,
         calendar_week: a.calendar_week as number,
         year: a.year as number,
