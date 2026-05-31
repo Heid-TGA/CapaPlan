@@ -941,28 +941,6 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
               </span>
             )}
 
-            {/* Zeitachsen-Navigation (6B-0) */}
-            <div className="flex items-center gap-1">
-              <button onClick={goPrev} title="1 Monat zurück"
-                className="p-1 rounded-md border border-slate-200 bg-white text-slate-500 hover:bg-slate-50 transition-colors">
-                <ChevronLeft className="h-3.5 w-3.5" />
-              </button>
-              <button onClick={goToday} title="Aktuelles Fenster"
-                className="px-2 py-1 rounded-md border border-slate-200 bg-white text-[10px] font-medium text-slate-600 hover:bg-slate-50 transition-colors">
-                Heute
-              </button>
-              <button onClick={goNext} title="1 Monat vor"
-                className="p-1 rounded-md border border-slate-200 bg-white text-slate-500 hover:bg-slate-50 transition-colors">
-                <ChevronRight className="h-3.5 w-3.5" />
-              </button>
-              <span className="ml-1 text-[10px] text-slate-400 tabular-nums whitespace-nowrap">
-                KW {windowWeeks[0]?.week}–{windowWeeks[windowWeeks.length - 1]?.week}
-                {windowWeeks[0] && windowWeeks[windowWeeks.length - 1] && windowWeeks[0].year !== windowWeeks[windowWeeks.length - 1].year
-                  ? ` ${windowWeeks[0].year}/${windowWeeks[windowWeeks.length - 1].year}`
-                  : ` ${windowWeeks[0]?.year}`}
-              </span>
-            </div>
-
             <span className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-blue-50 text-blue-600 text-[10px] font-medium">H&I-Zone (nächste {H_I_WEEKS} Wo.)</span>
             <span className="flex items-center gap-1"><X className="h-3 w-3 text-red-600" strokeWidth={3} />Extern</span>
             <span className="flex items-center gap-1"><Circle className="h-3 w-3 text-blue-500 fill-blue-500" />Intern</span>
@@ -991,7 +969,9 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                     {isSel && <ChevronRight className="h-3 w-3 text-slate-400 ml-auto shrink-0" />}
                   </div>
                   <div style={{ width: CAP_COL, minWidth: CAP_COL }} className="border-r border-slate-100" />
-                  <div className="flex-1 relative">
+                  {/* minHeight 28: gibt dem absolut positionierten GanttBar wieder eine
+                      Box (sonst kollabiert flex-1 auf 0 → Balken unsichtbar). */}
+                  <div className="flex-1 relative" style={{ minHeight: 28 }}>
                     <div className="absolute inset-0 flex pointer-events-none">
                       {windowWeeks.map((w, i) => (
                         <div key={i} style={{ width: COL_WIDTH, minWidth: COL_WIDTH }}
@@ -1153,6 +1133,32 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                   )
                 })
               )}
+            </div>
+
+            {/* ── ZEITACHSEN-NAVIGATION (6B-0): direkt über der KW-Zeile, links am
+                   Beginn des Zeitstrahls (nach Mitarbeiter-/Kap-Spalten). ── */}
+            <div className="flex items-center bg-slate-50/70 border-b border-slate-100">
+              <div style={{ width: EMP_COL + CAP_COL, minWidth: EMP_COL + CAP_COL }} className="border-r border-slate-100" />
+              <div className="flex items-center gap-1 px-2 py-1.5">
+                <button onClick={goPrev} title="1 Monat zurück"
+                  className="p-1 rounded-md border border-slate-200 bg-white text-slate-500 hover:bg-slate-50 transition-colors">
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </button>
+                <button onClick={goToday} title="Aktuelles Fenster"
+                  className="px-2 py-1 rounded-md border border-slate-200 bg-white text-[10px] font-medium text-slate-600 hover:bg-slate-50 transition-colors">
+                  Heute
+                </button>
+                <button onClick={goNext} title="1 Monat vor"
+                  className="p-1 rounded-md border border-slate-200 bg-white text-slate-500 hover:bg-slate-50 transition-colors">
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </button>
+                <span className="ml-1.5 text-[10px] text-slate-400 tabular-nums whitespace-nowrap">
+                  KW {windowWeeks[0]?.week}–{windowWeeks[windowWeeks.length - 1]?.week}
+                  {windowWeeks[0] && windowWeeks[windowWeeks.length - 1] && windowWeeks[0].year !== windowWeeks[windowWeeks.length - 1].year
+                    ? ` ${windowWeeks[0].year}/${windowWeeks[windowWeeks.length - 1].year}`
+                    : ` ${windowWeeks[0]?.year}`}
+                </span>
+              </div>
             </div>
 
             {/* ── KW-HEADER ── */}

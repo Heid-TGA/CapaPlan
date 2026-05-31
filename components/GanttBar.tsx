@@ -30,19 +30,28 @@ export default function GanttBar({
 
   const hasSchedule = startKw != null && endKw != null
 
-  // Index der Start/End-KW im Fenster: week UND year müssen passen.
-  const startIdx = weeks.findIndex((w) => w.week === startKw && w.year === planYear)
-  const endIdx = weeks.findIndex((w) => w.week === endKw && w.year === planYear)
+  // Fenster-Spalten, die im Termin [startKw..endKw] des plan_year liegen (jahres-
+  // sicher). Statt nur die Kanten zu suchen, werden alle Spalten im Zeitraum
+  // betrachtet — so bleibt ein Balken auch sichtbar, wenn er das Fenster komplett
+  // überspannt (beide Kanten außerhalb). Clipping passiert über erste/letzte
+  // Treffer-Spalte; liegt der Balken komplett außerhalb, gibt es keinen Treffer.
+  const inSched = (w: WeekRef) =>
+    hasSchedule && w.year === planYear && w.week >= startKw! && w.week <= endKw!
+  const firstIdx = hasSchedule ? weeks.findIndex(inSched) : -1
+  let lastIdx = -1
+  if (hasSchedule) {
+    for (let i = weeks.length - 1; i >= 0; i--) {
+      if (inSched(weeks[i])) { lastIdx = i; break }
+    }
+  }
 
-  // Sichtbarkeit: Ohne Termin immer (Default-Balken). Mit Termin nur, wenn
-  // mindestens eine Kante im Fenster liegt (sonst liegt der Balken außerhalb).
-  const renderBar = !hasSchedule || startIdx >= 0 || endIdx >= 0
+  // Sichtbarkeit: Ohne Termin immer (Default-Balken zum Anlegen). Mit Termin nur,
+  // wenn mindestens eine Fensterspalte im Zeitraum liegt.
+  const renderBar = !hasSchedule || firstIdx >= 0
 
   // Position inkl. Clipping an den Fensterrändern.
-  const barStart = !hasSchedule ? 0 : startIdx >= 0 ? startIdx : 0
-  const barEnd = !hasSchedule
-    ? Math.min(weeks.length - 1, 1)
-    : endIdx >= 0 ? endIdx : weeks.length - 1
+  const barStart = !hasSchedule ? 0 : firstIdx
+  const barEnd = !hasSchedule ? Math.min(weeks.length - 1, 1) : lastIdx
 
   const left = barStart * colWidth
   const width = (barEnd - barStart + 1) * colWidth
