@@ -359,9 +359,10 @@ export default function HoaiCalculatorModal({ projectId, projectName, onClose }:
           </div>
 
           <p className="text-[10px] text-slate-400">
-            Gespeicherte HOAI-Szenarien können in der Projektplanung als Budgetbasis für einzelne
-            LPH verwendet werden. Es handelt sich weiterhin um eine Dummy-/Schätzlogik; Abacus-Budgets
-            werden dadurch nicht überschrieben.
+            Gespeicherte HOAI-Szenarien können in der Projektplanung als <strong>Budgetquelle auf
+            Projektebene</strong> dienen. Es bleibt eine Dummy-/Schätzlogik; Abacus-Budgets werden
+            dadurch nicht überschrieben. Die echte Übernahme/Verteilung auf Anlagengruppen und LPH
+            folgt in einem separaten Paket.
           </p>
         </div>
       </div>
