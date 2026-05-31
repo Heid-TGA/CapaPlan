@@ -5,7 +5,7 @@
 // Isoliertes Planungswerkzeug. Ein Szenario hat jetzt je AG 1–5 eine eigene
 // Tabelle: anrechenbare Kosten, Honorarsatz, ein FESTES „Grundhonorar"
 // (= anrechenbare Kosten × Honorar-% / 100, unabhaengig von der LPH-Auswahl)
-// und darunter LPH 1–7 mit Checkbox + editierbarem Anteil. Die untere Summenzeile
+// und darunter LPH 1–9 mit Checkbox + editierbarem Anteil. Die untere Summenzeile
 // zeigt NUR die AUSGEWAEHLTEN LPH-Prozente bzw. -Honorare (nicht zwingend 100 %).
 //
 // Persistenz: hoai_calc_scenarios (Header) + hoai_scenario_ag (AG-Konfig) +
@@ -86,7 +86,7 @@ function parsePct(raw: string): number {
   return Math.min(100, Math.max(0, n))
 }
 
-// Default-Editiermodell fuer AG 1–5 (alle deaktiviert, LPH 1–7 ausgewaehlt).
+// Default-Editiermodell fuer AG 1–5 (alle deaktiviert, LPH 1–9 ausgewaehlt).
 function defaultAgEdits(): AgEdit[] {
   return ANLAGENGRUPPEN.map((g) => ({
     ag_number: g.ag,
@@ -460,7 +460,7 @@ export default function HoaiCalculatorModal({ projectId, projectName, onClose }:
                         </p>
                       </div>
 
-                      {/* LPH-Tabelle 1–7 */}
+                      {/* LPH-Tabelle 1–9 */}
                       <div className="rounded-lg border border-slate-200 overflow-hidden">
                         <div className="flex items-center bg-slate-50 px-3 py-2 border-b border-slate-100">
                           <span className="w-5" />

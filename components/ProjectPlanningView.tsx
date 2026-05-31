@@ -799,12 +799,12 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   }
 
   // Effektives LPH-Sollbudget einer Zeile: bei aktiver HOAI-Quelle die aus dem
-  // Szenario abgeleitete Gewerk-/LPH-Basis (LPH 1–7), sonst das zentrale
+  // Szenario abgeleitete Gewerk-/LPH-Basis (LPH 1–9), sonst das zentrale
   // Abacus-/Projekt-LPH-Budget. Greift NICHT in project_lph_budgets ein.
   function effectiveLphBudgetEur(s: LphSchedule): number {
     if (hoaiLphBudget) {
       const g = gewerkOfSchedule(s)
-      if (g && s.lph_number >= 1 && s.lph_number <= 7) {
+      if (g && s.lph_number >= 1 && s.lph_number <= 9) {
         return hoaiLphBudget[g][s.lph_number] ?? 0
       }
     }
@@ -1020,7 +1020,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     }
     return { hours, hasDistribution }
   }
-  // 10.4: Sollstunden aus einer Gewerk-/LPH-Budgetmatrix (HOAI). Je LPH 1–7 das
+  // 10.4: Sollstunden aus einer Gewerk-/LPH-Budgetmatrix (HOAI). Je LPH 1–9 das
   // bereits abgeleitete LPH-Budget über die Rollenverteilung in Stunden umrechnen.
   function gewerkSollHoursFromLphMap(lphMap: Record<number, number>): { hours: number; hasDistribution: boolean } {
     let hours = 0

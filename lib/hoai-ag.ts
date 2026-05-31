@@ -9,9 +9,9 @@
 //   * Vereinfachter Planungs-/Dummy-Rechner, KEINE rechtsverbindliche
 //     HOAI-Berechnung.
 //   * NUR AG 1–5 (Gewerk-Zuordnung über lib/anlagengruppen.ts), AG 6–8 bewusst
-//     nicht modelliert.
-//   * NUR LPH 1–7 (LPH 8/9 sind hier kein Bestandteil — die Summe der
-//     LPH-Anteile ist daher < 100 %).
+//     nicht modelliert. (Achtung: AG = Anlagengruppe, NICHT LPH.)
+//   * LPH 1–9 (vollständiges Leistungsbild). Sind ALLE LPH ausgewählt, ergibt die
+//     Anteilssumme genau 100 %.
 //   * Begriff: das je AG feste „Grundhonorar" = anrechenbare Kosten × Honorar-%.
 //     Die je LPH ausgewählte Summe ist die EFFEKTIVE Planungsbasis (≤ Grundhonorar).
 //
@@ -20,11 +20,11 @@
 
 import { type Gewerk, gewerkForAg, AG_NUMBERS } from './anlagengruppen'
 
-// LPH 1–7 (LPH 8/9 bewusst ausgeschlossen).
-export const HOAI_AG_LPH_NUMBERS = [1, 2, 3, 4, 5, 6, 7] as const
+// LPH 1–9 (vollständiges Leistungsbild).
+export const HOAI_AG_LPH_NUMBERS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const
 
 // Fachlich richtige Default-Anteile je LPH (HOAI, TGA). Bleiben als Default,
-// sind aber pro AG editierbar. Summe = 62 % (kein Voll-100 %, da ohne LPH 8/9).
+// sind aber pro AG editierbar. Summe = 100 % (alle LPH 1–9 ausgewählt).
 export const HOAI_AG_LPH_DEFAULT_PCT: Record<number, number> = {
   1: 2,   // Grundlagenermittlung
   2: 9,   // Vorplanung
@@ -33,6 +33,8 @@ export const HOAI_AG_LPH_DEFAULT_PCT: Record<number, number> = {
   5: 22,  // Ausführungsplanung
   6: 6,   // Vorbereitung der Vergabe
   7: 4,   // Mitwirkung bei der Vergabe
+  8: 32,  // Objektüberwachung
+  9: 6,   // Objektbetreuung
 }
 
 export const HOAI_AG_LPH_DEFAULT_SUM = HOAI_AG_LPH_NUMBERS.reduce(
@@ -77,7 +79,7 @@ export function lphHonorar(grund: number, pct: number): number {
   return (g * clampPct(pct)) / 100
 }
 
-// Default-LPH-Konfiguration (alle LPH 1–7 ausgewählt, Default-Prozente).
+// Default-LPH-Konfiguration (alle LPH 1–9 ausgewählt, Default-Prozente).
 export function defaultLphConfigs(): HoaiAgLphConfig[] {
   return HOAI_AG_LPH_NUMBERS.map((n) => ({
     lph_number: n,
@@ -150,7 +152,7 @@ export function gewerkLphBudgetsFromConfigs(
   return out
 }
 
-// Gewerkbudget (Σ über LPH 1–7) aus der Gewerk-/LPH-Matrix.
+// Gewerkbudget (Σ über LPH 1–9) aus der Gewerk-/LPH-Matrix.
 export function gewerkBudgetFromLphMap(lphMap: Record<number, number>): number {
   return round2(HOAI_AG_LPH_NUMBERS.reduce((s, n) => s + (lphMap[n] ?? 0), 0))
 }

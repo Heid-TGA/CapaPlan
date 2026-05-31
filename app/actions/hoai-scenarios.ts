@@ -238,7 +238,7 @@ export async function deleteHoaiScenario(
 //
 // Ein DETAIL-Szenario (mode='ag') ergaenzt den Header um zwei Child-Tabellen:
 //   * hoai_scenario_ag      : je AG 1–5 -> enabled, anrechenbare_kosten, honorar_pct
-//   * hoai_scenario_ag_lph  : je (AG, LPH 1–7) -> selected, pct
+//   * hoai_scenario_ag_lph  : je (AG, LPH 1–9) -> selected, pct
 // Das je AG feste Grundhonorar und die LPH-Honorare werden NICHT gespeichert,
 // sondern aus diesen Eingaben abgeleitet (lib/hoai-ag.ts). Der Header behaelt
 // repraesentative Aggregatwerte (anrechenbare_kosten = Σ aktive AG-Kosten,
@@ -281,7 +281,7 @@ interface SaveHoaiDetailInput {
 }
 
 // Detail (Header + AG- + LPH-Zeilen) eines Szenarios laden. Liefert IMMER eine
-// vollstaendige AG-1–5 / LPH-1–7-Matrix; fehlende Zeilen werden mit Defaults
+// vollstaendige AG-1–5 / LPH-1–9-Matrix; fehlende Zeilen werden mit Defaults
 // (deaktiviert, Default-Prozente) aufgefuellt. RLS beschraenkt auf erlaubte
 // Projekte (PL nur eigene). Alt-Szenarien (mode='simple') liefern eine
 // Default-Matrix (keine Child-Zeilen vorhanden) und behalten ihren Header.
@@ -355,7 +355,7 @@ export async function loadHoaiScenarioDetail(
 //   * id gesetzt  -> Header aktualisieren (muss zum Projekt gehoeren).
 //   * id leer     -> neues Szenario anlegen (mode='ag', is_dummy=true).
 //   * Child-Zeilen werden vollstaendig ERSETZT (delete + reinsert je scenario_id):
-//       AG 1–5 (alle 5 Zeilen) + LPH 1–7 je AG (35 Zeilen).
+//       AG 1–5 (alle 5 Zeilen) + LPH 1–9 je AG (45 Zeilen).
 //   * Mindestens eine AKTIVE AG mit anrechenbaren Kosten > 0 und positivem
 //     Grundhonorar ist erforderlich (sonst koennte der Header-CHECK nicht
 //     erfuellt werden).
@@ -371,7 +371,7 @@ export async function saveHoaiScenarioDetail(
     return { success: false, message: 'Keine Anlagengruppen uebergeben.' }
   }
 
-  // ── Eingaben normalisieren/validieren (AG 1–5, LPH 1–7) ───────────────────
+  // ── Eingaben normalisieren/validieren (AG 1–5, LPH 1–9) ───────────────────
   const agInputByNum = new Map<number, SaveHoaiDetailAgInput>()
   for (const a of payload.ags) {
     if (typeof a?.ag_number !== 'number' || !AG_NUMBERS.includes(a.ag_number as 1 | 2 | 3 | 4 | 5)) {
