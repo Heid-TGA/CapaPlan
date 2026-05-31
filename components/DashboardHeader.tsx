@@ -1,8 +1,9 @@
 'use client'
 
 import { useState } from 'react'
-import { UploadCloud, CalendarDays } from 'lucide-react'
+import { UploadCloud, CalendarDays, SlidersHorizontal } from 'lucide-react'
 import DataImport from './DataImport'
+import PlanningRolesModal from './PlanningRolesModal'
 
 interface DashboardHeaderProps {
   userName: string
@@ -13,6 +14,7 @@ type ImportType = 'abacus' | 'hi' | null
 
 export default function DashboardHeader({ userName, userRole }: DashboardHeaderProps) {
   const [activeImport, setActiveImport] = useState<ImportType>(null)
+  const [showRoles, setShowRoles] = useState(false)
 
   const today = new Date().toLocaleDateString('de-DE', {
     weekday: 'long',
@@ -67,6 +69,22 @@ export default function DashboardHeader({ userName, userRole }: DashboardHeaderP
                 <UploadCloud className="h-3.5 w-3.5" />
                 H&amp;I Einsatzplanung
               </button>
+
+              {/* Button 3: Planungsrollen (interne Planungssätze) */}
+              <button
+                onClick={() => setShowRoles(true)}
+                className="
+                  inline-flex items-center gap-2 px-3.5 py-2 rounded-lg
+                  text-sm font-medium text-slate-600
+                  border border-slate-200 bg-white
+                  hover:bg-slate-50 hover:border-slate-300
+                  transition-all duration-150 active:scale-[0.98]
+                  whitespace-nowrap
+                "
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5 text-slate-400" />
+                Planungsrollen
+              </button>
             </>
           )}
 
@@ -87,6 +105,11 @@ export default function DashboardHeader({ userName, userRole }: DashboardHeaderP
           initialTab={activeImport}
           onClose={() => setActiveImport(null)}
         />
+      )}
+
+      {/* Planungsrollen-Modal — nur für TL erreichbar (Button oben) */}
+      {showRoles && (
+        <PlanningRolesModal onClose={() => setShowRoles(false)} />
       )}
     </>
   )
