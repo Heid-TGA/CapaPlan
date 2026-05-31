@@ -17,6 +17,7 @@ import DataImport from './DataImport'
 import PlanningRolesModal from './PlanningRolesModal'
 import ManualProjectModal from './ManualProjectModal'
 import RolePlanDefaultsModal from './RolePlanDefaultsModal'
+import EmployeeDataModal from './EmployeeDataModal'
 
 interface DashboardHeaderProps {
   userName: string
@@ -42,6 +43,7 @@ export default function DashboardHeader({ userName, userRole }: DashboardHeaderP
   const [showDefaults, setShowDefaults] = useState(false)
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null)
   const [showManual, setShowManual] = useState(false)
+  const [showEmployees, setShowEmployees] = useState(false)
 
   const today = new Date().toLocaleDateString('de-DE', {
     weekday: 'long',
@@ -103,7 +105,7 @@ export default function DashboardHeader({ userName, userRole }: DashboardHeaderP
 
               {/* Button 2: Mitarbeiterdaten */}
               <button
-                onClick={() => setActiveImport('abacus')}
+                onClick={() => setShowEmployees(true)}
                 className={btnSecondary}
               >
                 <Users className="h-3.5 w-3.5 text-slate-400" />
@@ -204,6 +206,16 @@ export default function DashboardHeader({ userName, userRole }: DashboardHeaderP
         <ManualProjectModal
           onClose={() => setShowManual(false)}
           onCreated={() => router.refresh()}
+        />
+      )}
+
+      {/* Mitarbeiterdaten-Verwaltung (Paket 11): Tabs Mitarbeiter / Import */}
+      {showEmployees && (
+        <EmployeeDataModal
+          onClose={() => {
+            setShowEmployees(false)
+            router.refresh()
+          }}
         />
       )}
     </>
