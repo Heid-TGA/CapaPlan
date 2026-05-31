@@ -7,6 +7,9 @@ import { loadProjectAllocations } from '@/app/actions/heatmap'
 import { loadTerminplan, saveLphSchedule, saveMilestone, ensureLphBudgetRow, type LphSchedule, type Milestone } from '@/app/actions/terminplan'
 import { loadExternalTrades, createExternalTrade, deleteExternalTrade, type ExternalTrade } from '@/app/actions/external-trades'
 import { updateProjectCalcProfile } from '@/app/actions/project-settings'
+import { loadPlanningRoles, type PlanningRole } from '@/app/actions/planning-roles'
+import { loadLphRolePlan, saveLphRolePlan } from '@/app/actions/lph-role-plan'
+import { loadProjectBudgetAreas, type BudgetArea } from '@/app/actions/budget-areas'
 import { ALL_LPH, LPH_LABELS } from '@/lib/planning-phases'
 import { CALC_PROFILES, CALC_PROFILE_LABELS, isCalcProfile, type CalcProfile } from '@/lib/calc-profile'
 import { isoWeekOf, mondayOfIsoWeek } from '@/lib/calendar-weeks'
@@ -54,6 +57,13 @@ function getCurrentWeek(): number {
 }
 function fmtEur(n: number) {
   return new Intl.NumberFormat('de-DE',{style:'currency',currency:'EUR',maximumFractionDigits:0}).format(n)
+}
+// Prozent-Eingabe (de) -> number, geklemmt auf 0..100. Leer/ungueltig -> 0.
+function parseSharePct(raw: string | undefined): number {
+  if (!raw) return 0
+  const n = parseFloat(raw.replace(',', '.'))
+  if (!Number.isFinite(n)) return 0
+  return Math.min(100, Math.max(0, n))
 }
 
 // ── Haupt-Komponente ───────────────────────────────────────────────────────────
@@ -107,6 +117,19 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
   // HOAI-Dummy-Rechner (A2) — rein lokales Szenario-Fenster, keine Persistenz.
   const [showHoai, setShowHoai] = useState(false)
+
+  // Rollenverteilung je LPH (6B-2B) — reines Soll-/Planungsmodell.
+  // KEINE Mitarbeiterzuweisung, kein allocations-Schreibpfad, keine Stundensaetze
+  // von Mitarbeitenden. Nutzt die echte lph_id (UUID), nicht primaryLphId.
+  const [showRolePlan, setShowRolePlan] = useState(false)
+  const [planRoles, setPlanRoles] = useState<PlanningRole[]>([])
+  const [planAreas, setPlanAreas] = useState<BudgetArea[]>([])
+  const [rpAreaId, setRpAreaId] = useState<string>('') // '' = Gesamt / ohne Bereich
+  const [rpShares, setRpShares] = useState<Record<string, string>>({}) // roleId -> %-String
+  const [rpLoading, setRpLoading] = useState(false)
+  const [rpSaving, setRpSaving] = useState(false)
+  const [rpError, setRpError] = useState<string | null>(null)
+  const [rpSavedMsg, setRpSavedMsg] = useState<string | null>(null)
 
   const currentWeek = getCurrentWeek()
   const currentYear = new Date().getFullYear()
@@ -227,6 +250,64 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     : (visibleSorted[0]?.lph_number ?? null)
   const activeSchedule = activeLph != null ? schedules.find(s => s.lph_number === activeLph) ?? null : null
   const primaryLphId = activeLph != null ? `${selectedProject?.id}_lph${activeLph}` : ''
+  // Echte LPH-UUID (aus project_lph_budgets) — Pflicht fuer lph_role_plan.
+  const realLphId = activeSchedule?.lph_id ?? null
+
+  // ── Rollenverteilung (6B-2B) ────────────────────────────────────────────────
+  // Aktive Planungsrollen + Budgetbereiche je Projekt laden.
+  useEffect(() => {
+    const pid = selectedProject?.id
+    setRpAreaId(''); setRpSavedMsg(null); setRpError(null)
+    if (!pid) { setPlanRoles([]); setPlanAreas([]); return }
+    let cancelled = false
+    Promise.all([loadPlanningRoles(), loadProjectBudgetAreas(pid)])
+      .then(([rolesRes, areasRes]) => {
+        if (cancelled) return
+        setPlanRoles(rolesRes.success ? rolesRes.data.filter(r => r.active) : [])
+        setPlanAreas(areasRes.success ? areasRes.data : [])
+      })
+      .catch(() => { if (!cancelled) { setPlanRoles([]); setPlanAreas([]) } })
+    return () => { cancelled = true }
+  }, [selectedProject?.id]) // eslint-disable-line
+
+  // Vorhandene Verteilung der aktiven LPH (+ Bereich) laden.
+  useEffect(() => {
+    setRpSavedMsg(null)
+    if (!realLphId) { setRpShares({}); return }
+    let cancelled = false
+    setRpLoading(true)
+    loadLphRolePlan(realLphId, rpAreaId || null)
+      .then(res => {
+        if (cancelled) return
+        const m: Record<string, string> = {}
+        if (res.success) for (const s of res.data) m[s.role_id] = String(s.share_pct)
+        setRpShares(m)
+      })
+      .catch(() => { if (!cancelled) setRpShares({}) })
+      .finally(() => { if (!cancelled) setRpLoading(false) })
+    return () => { cancelled = true }
+  }, [realLphId, rpAreaId])
+
+  async function handleSaveRolePlan() {
+    if (!realLphId) return
+    setRpSaving(true); setRpError(null); setRpSavedMsg(null)
+    try {
+      const shares = planRoles.map(r => ({ roleId: r.id, sharePct: parseSharePct(rpShares[r.id]) }))
+      const res = await saveLphRolePlan(realLphId, rpAreaId || null, shares)
+      if (!res.success) { setRpError(res.message || 'Speichern fehlgeschlagen'); return }
+      const m: Record<string, string> = {}
+      for (const s of res.data) m[s.role_id] = String(s.share_pct)
+      setRpShares(m)
+      setRpSavedMsg('Gespeichert')
+    } catch (e) {
+      setRpError(e instanceof Error ? e.message : 'Speichern fehlgeschlagen')
+    } finally {
+      setRpSaving(false)
+    }
+  }
+
+  const rpSum = planRoles.reduce((a, r) => a + parseSharePct(rpShares[r.id]), 0)
+  const rpSumRounded = Math.round(rpSum * 10) / 10
 
   async function toggleLph(n: number) {
     // Abwählen: nur aus der sichtbaren Liste nehmen — KEINE DB-Zeile / Allocations /
@@ -545,6 +626,90 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
             <button onClick={() => setShowDummies(v => !v)} className="text-[10px] text-slate-400 hover:text-slate-600 underline underline-offset-2">{showDummies ? 'ausbl.' : 'einbl.'}</button>
           </div>
         </div>
+      </div>
+
+      {/* ── Rollenverteilung (Soll-Planung, 6B-2B) ── */}
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <button onClick={() => setShowRolePlan(v => !v)}
+          className="w-full flex items-center justify-between px-5 py-3 hover:bg-slate-50/60 transition-colors">
+          <div className="flex items-center gap-2">
+            <ChevronRight className={`h-3.5 w-3.5 text-slate-400 transition-transform ${showRolePlan ? 'rotate-90' : ''}`} />
+            <span className="text-sm font-semibold text-slate-700">Rollenverteilung</span>
+            <span className="text-[11px] text-slate-400">
+              {activeLph != null ? `LPH ${activeLph} · Soll-Planung` : 'Keine LPH gewählt'}
+            </span>
+          </div>
+          {showRolePlan && realLphId && planRoles.length > 0 && (
+            <span className={`text-[10px] font-medium tabular-nums ${rpSum === 100 ? 'text-emerald-600' : 'text-amber-600'}`}>
+              Σ {rpSumRounded} %
+            </span>
+          )}
+        </button>
+
+        {showRolePlan && (
+          <div className="px-5 pb-4 border-t border-slate-100">
+            {activeLph == null || !realLphId ? (
+              <p className="py-4 text-xs text-slate-400">Bitte zuerst eine Leistungsphase mit Budgetzeile wählen.</p>
+            ) : (
+              <div className="pt-3 space-y-3 max-w-md">
+                {/* Bereich */}
+                <div className="flex items-center gap-2">
+                  <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Bereich</label>
+                  <select value={rpAreaId} onChange={e => { setRpAreaId(e.target.value); setRpSavedMsg(null) }}
+                    className="text-sm border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-700 outline-none focus:border-slate-400">
+                    <option value="">Gesamt / ohne Bereich</option>
+                    {planAreas.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                </div>
+
+                {/* Rollen */}
+                {rpLoading ? (
+                  <p className="text-xs text-slate-400 py-2">Laden…</p>
+                ) : planRoles.length === 0 ? (
+                  <p className="text-xs text-slate-400 py-2">Keine aktiven Planungsrollen. (TL legt sie über „Planungsrollen“ an.)</p>
+                ) : (
+                  <div className="rounded-lg border border-slate-200 divide-y divide-slate-100">
+                    {planRoles.map(r => (
+                      <div key={r.id} className="flex items-center gap-2 px-3 py-1.5">
+                        <span className="flex-1 text-sm text-slate-700">{r.name}</span>
+                        <div className="flex items-center gap-1">
+                          <input type="text" inputMode="decimal" value={rpShares[r.id] ?? ''}
+                            onChange={e => { setRpShares(s => ({ ...s, [r.id]: e.target.value })); setRpSavedMsg(null) }}
+                            placeholder="0"
+                            className="w-16 text-sm text-right border border-slate-200 rounded-md px-2 py-1 outline-none focus:border-slate-400 text-slate-800 tabular-nums" />
+                          <span className="text-xs text-slate-400">%</span>
+                        </div>
+                      </div>
+                    ))}
+                    <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-50">
+                      <span className="flex-1 text-xs font-semibold text-slate-500">Summe</span>
+                      <span className={`text-xs font-semibold tabular-nums ${rpSum === 100 ? 'text-emerald-600' : 'text-amber-600'}`}>
+                        {rpSumRounded} %
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {planRoles.length > 0 && rpSum !== 100 && (
+                  <p className="text-[11px] text-amber-600">Hinweis: Summe ist nicht 100 % — Speichern ist trotzdem möglich.</p>
+                )}
+                {rpError && <p className="text-[11px] text-red-500">{rpError}</p>}
+
+                <div className="flex items-center gap-2">
+                  <button onClick={handleSaveRolePlan} disabled={rpSaving || planRoles.length === 0}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 disabled:opacity-50">
+                    {rpSaving ? 'Speichern…' : 'Speichern'}
+                  </button>
+                  {rpSavedMsg && <span className="text-[11px] text-emerald-600">{rpSavedMsg}</span>}
+                </div>
+
+                <p className="text-[10px] text-slate-400">
+                  Soll-/Planungsmodell · keine echten Mitarbeiterzuweisungen, keine Mitarbeiter-Stundensätze.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ── INTEGRIERTE ANSICHT: Gantt + Matrix ── */}
