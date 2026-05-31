@@ -10,7 +10,7 @@ import { updateProjectCalcProfile } from '@/app/actions/project-settings'
 import { loadPlanningRoles, type PlanningRole } from '@/app/actions/planning-roles'
 import { loadLphRolePlan, saveLphRolePlan, loadProjectRolePlans, type LphRoleShare } from '@/app/actions/lph-role-plan'
 import { loadProjectBudgetAreas, type BudgetArea } from '@/app/actions/budget-areas'
-import { getDefaultGroupForLph } from '@/app/actions/role-plan-defaults'
+import { getDefaultGroupForLph, loadRolePlanDefaults, type RolePlanDefault } from '@/app/actions/role-plan-defaults'
 import { groupKeyForLph, ROLE_PLAN_DEFAULT_GROUP_LABELS } from '@/lib/role-plan-defaults'
 import { ALL_LPH, LPH_LABELS } from '@/lib/planning-phases'
 import { CALC_PROFILES, CALC_PROFILE_LABELS, isCalcProfile, type CalcProfile } from '@/lib/calc-profile'
@@ -134,6 +134,9 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const [planAreas, setPlanAreas] = useState<BudgetArea[]>([])
   // Alle Rollenverteilungen des Projekts (für SOLL-Stunden je LPH-Balken, 6B-2D).
   const [rolePlans, setRolePlans] = useState<LphRoleShare[]>([])
+  // 7C Fix A: globale Default-Rollenverteilungen (Fallback für SOLL, wenn eine
+  // LPH noch keine eigene Verteilung hat). Reine Vorlagen, keine allocations.
+  const [rolePlanDefaults, setRolePlanDefaults] = useState<RolePlanDefault[]>([])
   const [rpAreaId, setRpAreaId] = useState<string>('') // '' = Gesamt / ohne Bereich
   const [rpShares, setRpShares] = useState<Record<string, string>>({}) // roleId -> %-String
   const [rpLoading, setRpLoading] = useState(false)
@@ -320,6 +323,15 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       .catch(() => { if (!cancelled) { setPlanRoles([]); setPlanAreas([]) } })
     return () => { cancelled = true }
   }, [selectedProject?.id]) // eslint-disable-line
+
+  // 7C Fix A: globale Default-Verteilungen einmalig laden (Fallback für SOLL).
+  useEffect(() => {
+    let cancelled = false
+    loadRolePlanDefaults()
+      .then(res => { if (!cancelled) setRolePlanDefaults(res.success ? res.data : []) })
+      .catch(() => { if (!cancelled) setRolePlanDefaults([]) })
+    return () => { cancelled = true }
+  }, [])
 
   // Vorhandene Verteilung der aktiven LPH (+ Bereich) laden.
   useEffect(() => {
@@ -676,9 +688,28 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       ? activeSchedule.end_kw - activeSchedule.start_kw + 1
       : null
 
+  // ── Default-Fallback (7C Fix A) ─────────────────────────────────────────────
+  // Default-Prozente je Gruppe (lph_1_5 / lph_6_7 / lph_8_9) -> roleId -> pct.
+  const defaultPctByGroup: Record<string, Map<string, number>> = {}
+  for (const d of rolePlanDefaults) {
+    if (d.share_pct <= 0) continue
+    ;(defaultPctByGroup[d.group_key] ??= new Map()).set(d.role_id, d.share_pct)
+  }
+  // Planungssatz je Rolle (für die Soll-Umrechnung der Defaults).
+  const roleRateById = new Map(planRoles.map(r => [r.id, r.rate_eur_per_hour]))
+
+  // Aktive LPH: hat sie eine EIGENE Verteilung (>0 %) für den aktuellen Bereich?
+  const rpHasOwn = planRoles.some(r => parseSharePct(rpShares[r.id]) > 0)
+  const activeGroupKey = activeLph != null ? groupKeyForLph(activeLph) : null
+  const activeDefaultPct = activeGroupKey ? defaultPctByGroup[activeGroupKey] : undefined
+  // Fallback greift nur, wenn keine eigene Verteilung existiert UND ein Default da ist.
+  const usingDefaultForActive = !rpHasOwn && !!activeDefaultPct && activeDefaultPct.size > 0
+
   const sollRows = planRoles
     .map((r) => {
-      const pct = parseSharePct(rpShares[r.id])
+      const pct = usingDefaultForActive
+        ? (activeDefaultPct!.get(r.id) ?? 0)
+        : parseSharePct(rpShares[r.id])
       const rollenBudget = totalBudget * pct / 100
       const rate = r.rate_eur_per_hour
       const sollStunden = rate > 0 ? rollenBudget / rate : null
@@ -687,18 +718,30 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     })
     .filter((row) => row.pct > 0)
 
-  // ── IST/SOLL je LPH für die Balkenbeschriftung (6B-2D) ──────────────────────
-  // SOLL: budget_lph × Σ(share_pct/100 ÷ rate) über die Gesamt-Rollenverteilung
-  // (area_id = null), identisch zur bestehenden Soll-Rollenbedarf-Logik, aber je
-  // LPH. rate ≤ 0 → Rolle trägt 0 bei (sauber abgefangen).
+  // ── IST/SOLL je LPH für die Balkenbeschriftung (6B-2D + 7C Fix A) ───────────
+  // SOLL: budget_lph × Σ(share_pct/100 ÷ rate). Bevorzugt die EIGENE Gesamt-
+  // Rollenverteilung (area_id = null, share>0). Hat eine LPH keine eigene
+  // Verteilung, wird die passende DEFAULT-Gruppe als Fallback genutzt. rate ≤ 0
+  // → Rolle trägt 0 bei (sauber abgefangen).
   const sollByLph: Record<number, number> = {}
   for (const s of schedules) {
     const budget = lphBudgets[s.lph_number]?.budget_eur ?? s.budget_eur ?? 0
     if (budget <= 0) continue
     let soll = 0
-    for (const r of rolePlans) {
-      if (r.lph_id !== s.lph_id || r.area_id !== null) continue
-      if (r.role_rate_eur_per_hour > 0) soll += budget * r.share_pct / 100 / r.role_rate_eur_per_hour
+    const own = rolePlans.filter(r => r.lph_id === s.lph_id && r.area_id === null && r.share_pct > 0)
+    if (own.length > 0) {
+      for (const r of own) {
+        if (r.role_rate_eur_per_hour > 0) soll += budget * r.share_pct / 100 / r.role_rate_eur_per_hour
+      }
+    } else {
+      const grp = groupKeyForLph(s.lph_number)
+      const defs = grp ? defaultPctByGroup[grp] : undefined
+      if (defs) {
+        for (const [roleId, pct] of defs) {
+          const rate = roleRateById.get(roleId) ?? 0
+          if (rate > 0) soll += budget * pct / 100 / rate
+        }
+      }
     }
     sollByLph[s.lph_number] = soll
   }
@@ -863,6 +906,14 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                 <p className="text-[11px] text-amber-600">Hinweis: Summe ist nicht 100 % — Speichern ist trotzdem möglich.</p>
               )}
               {rpError && <p className="text-[11px] text-red-500">{rpError}</p>}
+
+              {usingDefaultForActive && (
+                <p className="text-[11px] text-blue-600 bg-blue-50 border border-blue-100 rounded-md px-2 py-1.5">
+                  Default-Verteilung wird für die Soll-Berechnung verwendet
+                  {activeGroupKey ? ` (${ROLE_PLAN_DEFAULT_GROUP_LABELS[activeGroupKey]})` : ''}.
+                  Mit „Default anwenden" dauerhaft in diese LPH übernehmen.
+                </p>
+              )}
 
               <div className="flex items-center gap-2 flex-wrap">
                 <button onClick={handleSaveRolePlan} disabled={rpSaving || rpApplying || planRoles.length === 0}
