@@ -1279,9 +1279,18 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
               </div>
             </div>
 
+            {/* Dezenter Hilfetext: Matrix ist projektbezogen, LPH-Auswertung rechnerisch (6B-2D). */}
+            <div className="px-5 py-1.5 bg-slate-50/60 border-b border-slate-100">
+              <p className="text-[10px] text-slate-400">
+                Projektstunden je KW · LPH-Auswertung erfolgt über Balkenlage. Die aktive LPH filtert die Matrix nicht.
+              </p>
+            </div>
+
             {/* ── KW-HEADER ── */}
             <div className="flex bg-slate-50 border-b border-slate-200">
-              <div style={{ width: EMP_COL, minWidth: EMP_COL }} className="px-5 py-2 text-xs font-medium text-slate-500 border-r border-slate-100">Mitarbeiter</div>
+              <div style={{ width: EMP_COL, minWidth: EMP_COL }}
+                title="Diese Stunden gelten für das Projekt und werden nicht durch die aktive LPH gefiltert."
+                className="px-5 py-2 text-xs font-medium text-slate-500 border-r border-slate-100 cursor-help">Mitarbeiter</div>
               <div style={{ width: CAP_COL, minWidth: CAP_COL }} className="py-2 text-xs font-medium text-slate-400 text-center border-r border-slate-100">Kap/Wo</div>
               {windowWeeks.map((w) => {
                 const inRange = isInRange(w)
