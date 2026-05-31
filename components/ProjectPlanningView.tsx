@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useTransition, useEffect, useRef } from 'react'
+import { useState, useTransition, useEffect, useRef, Fragment } from 'react'
 import { TrendingDown, Users, Clock, Euro, Circle, ChevronRight, ChevronLeft, Plus, X, Calculator } from 'lucide-react'
 import { upsertAllocation, getLphBudgetStatus } from '@/app/actions/allocation'
 import { loadProjectAllocationsForWindow } from '@/app/actions/heatmap'
@@ -125,7 +125,9 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // Rollenverteilung je LPH (6B-2B) — reines Soll-/Planungsmodell.
   // KEINE Mitarbeiterzuweisung, kein allocations-Schreibpfad, keine Stundensaetze
   // von Mitarbeitenden. Nutzt die echte lph_id (UUID), nicht primaryLphId.
-  const [showRolePlan, setShowRolePlan] = useState(false)
+  // 7D: Rollenverteilung klappt direkt unter der jeweiligen LPH-Zeile auf.
+  // Nur eine LPH gleichzeitig; immer an die aktive LPH gekoppelt.
+  const [expandedLph, setExpandedLph] = useState<number | null>(null)
   const [planRoles, setPlanRoles] = useState<PlanningRole[]>([])
   const [planAreas, setPlanAreas] = useState<BudgetArea[]>([])
   // Alle Rollenverteilungen des Projekts (für SOLL-Stunden je LPH-Balken, 6B-2D).
@@ -746,6 +748,147 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
+  // 7D: Inline-Rollenverteilung direkt unter der aktiven LPH-Zeile.
+  // Links: Prozentfelder (editierbar) · rechts: Soll-Rollenbedarf (read-only).
+  // Nutzt unveraendert realLphId/rpShares/sollRows/handleSaveRolePlan (aktive LPH).
+  function renderRolePanel() {
+    return (
+      <div className="border-b border-slate-100 bg-slate-50/50"
+        style={{ width: EMP_COL + CAP_COL + windowWeeks.length * COL_WIDTH }}>
+        {activeLph == null || !realLphId ? (
+          <p className="px-5 py-4 text-xs text-slate-400">Bitte zuerst eine Leistungsphase mit Budgetzeile wählen.</p>
+        ) : (
+          <div className="px-5 py-4 grid grid-cols-1 lg:grid-cols-2 gap-5 items-start">
+
+            {/* ── LINKS: Rollenverteilung (Prozente, editierbar) ── */}
+            <div className="space-y-3 max-w-md">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Rollenverteilung · LPH {activeLph}</p>
+                {realLphId && planRoles.length > 0 && (
+                  <span className={`text-[10px] font-medium tabular-nums ${rpSum === 100 ? 'text-emerald-600' : 'text-amber-600'}`}>
+                    Σ {rpSumRounded} %
+                  </span>
+                )}
+              </div>
+
+              {/* Bereich */}
+              <div className="flex items-center gap-2">
+                <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Bereich</label>
+                <select value={rpAreaId} onChange={e => { setRpAreaId(e.target.value); setRpSavedMsg(null) }}
+                  className="text-sm border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-700 outline-none focus:border-slate-400">
+                  <option value="">Gesamt / ohne Bereich</option>
+                  {planAreas.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+              </div>
+
+              {/* Rollen */}
+              {rpLoading ? (
+                <p className="text-xs text-slate-400 py-2">Laden…</p>
+              ) : planRoles.length === 0 ? (
+                <p className="text-xs text-slate-400 py-2">Keine aktiven Planungsrollen. (TL legt sie über „Mitarbeiterrollen“ an.)</p>
+              ) : (
+                <div className="rounded-lg border border-slate-200 divide-y divide-slate-100 bg-white">
+                  {planRoles.map(r => (
+                    <div key={r.id} className="flex items-center gap-2 px-3 py-1.5">
+                      <span className="flex-1 text-sm text-slate-700">{r.name}</span>
+                      <div className="flex items-center gap-1">
+                        <input type="text" inputMode="decimal" value={rpShares[r.id] ?? ''}
+                          onChange={e => { setRpShares(s => ({ ...s, [r.id]: e.target.value })); setRpSavedMsg(null) }}
+                          placeholder="0"
+                          className="w-16 text-sm text-right border border-slate-200 rounded-md px-2 py-1 outline-none focus:border-slate-400 text-slate-800 tabular-nums" />
+                        <span className="text-xs text-slate-400">%</span>
+                      </div>
+                    </div>
+                  ))}
+                  <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-50">
+                    <span className="flex-1 text-xs font-semibold text-slate-500">Summe</span>
+                    <span className={`text-xs font-semibold tabular-nums ${rpSum === 100 ? 'text-emerald-600' : 'text-amber-600'}`}>
+                      {rpSumRounded} %
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {planRoles.length > 0 && rpSum !== 100 && (
+                <p className="text-[11px] text-amber-600">Hinweis: Summe ist nicht 100 % — Speichern ist trotzdem möglich.</p>
+              )}
+              {rpError && <p className="text-[11px] text-red-500">{rpError}</p>}
+
+              <div className="flex items-center gap-2">
+                <button onClick={handleSaveRolePlan} disabled={rpSaving || planRoles.length === 0}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 disabled:opacity-50">
+                  {rpSaving ? 'Speichern…' : 'Speichern'}
+                </button>
+                {rpSavedMsg && <span className="text-[11px] text-emerald-600">{rpSavedMsg}</span>}
+              </div>
+
+              <p className="text-[10px] text-slate-400">
+                Soll-/Planungsmodell · keine echten Mitarbeiterzuweisungen, keine Mitarbeiter-Stundensätze.
+              </p>
+            </div>
+
+            {/* ── RECHTS: Soll-Rollenbedarf (read-only) ── */}
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Soll-Rollenbedarf</p>
+                <span className="text-[10px] text-slate-400">
+                  {lphWeeks ? `${lphWeeks} Wo` : 'kein Balken'} · {totalBudget > 0 ? fmtEur(totalBudget) : 'kein Budget'}
+                </span>
+              </div>
+
+              {totalBudget <= 0 ? (
+                <p className="text-[11px] text-slate-400 py-1">Kein LPH-Budget vorhanden.</p>
+              ) : sollRows.length === 0 ? (
+                <p className="text-[11px] text-slate-400 py-1">Noch keine Rollenverteilung gepflegt.</p>
+              ) : (
+                <>
+                  <div className="rounded-lg border border-slate-200 overflow-hidden bg-white">
+                    <div className="flex items-center bg-slate-50 px-2.5 py-1 border-b border-slate-100 text-[9px] font-semibold text-slate-400 uppercase tracking-wide">
+                      <span className="flex-1">Rolle</span>
+                      <span className="w-10 text-right">%</span>
+                      <span className="w-14 text-right">€/h</span>
+                      <span className="w-20 text-right">Budget</span>
+                      <span className="w-14 text-right">Soll h</span>
+                      <span className="w-16 text-right">h/Wo</span>
+                    </div>
+                    <div className="divide-y divide-slate-100">
+                      {sollRows.map((row) => (
+                        <div key={row.id} className="flex items-center px-2.5 py-1 text-[11px] text-slate-700 tabular-nums">
+                          <span className="flex-1 truncate">{row.name}</span>
+                          <span className="w-10 text-right">{Math.round(row.pct * 10) / 10}</span>
+                          {row.rate > 0 ? (
+                            <>
+                              <span className="w-14 text-right">{fmtEur(row.rate)}</span>
+                              <span className="w-20 text-right">{fmtEur(row.rollenBudget)}</span>
+                              <span className="w-14 text-right">{row.sollStunden != null ? `${Math.round(row.sollStunden * 10) / 10} h` : '—'}</span>
+                              <span className="w-16 text-right">{row.hProWoche != null ? `${Math.round(row.hProWoche * 10) / 10} h` : '—'}</span>
+                            </>
+                          ) : (
+                            <span className="flex-1 text-right text-amber-600">kein Planungssatz</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  {rpSum !== 100 && (
+                    <p className="mt-1 text-[10px] text-amber-600">
+                      Summe ist nicht 100 % — Rest ist unverplant bzw. überplant.
+                    </p>
+                  )}
+                  {lphWeeks == null && (
+                    <p className="mt-1 text-[10px] text-slate-400">
+                      Kein Terminbalken gesetzt — „h/Wo" wird erst mit Balken berechnet.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-4">
 
@@ -813,147 +956,6 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
             <button onClick={() => setShowDummies(v => !v)} className="text-[10px] text-slate-400 hover:text-slate-600 underline underline-offset-2">{showDummies ? 'ausbl.' : 'einbl.'}</button>
           </div>
         </div>
-      </div>
-
-      {/* ── Rollenverteilung (Soll-Planung, 6B-2B) ── */}
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-        <button onClick={() => setShowRolePlan(v => !v)}
-          className="w-full flex items-center justify-between px-5 py-3 hover:bg-slate-50/60 transition-colors">
-          <div className="flex items-center gap-2">
-            <ChevronRight className={`h-3.5 w-3.5 text-slate-400 transition-transform ${showRolePlan ? 'rotate-90' : ''}`} />
-            <span className="text-sm font-semibold text-slate-700">Rollenverteilung</span>
-            <span className="text-[11px] text-slate-400">
-              {activeLph != null ? `LPH ${activeLph} · Soll-Planung` : 'Keine LPH gewählt'}
-            </span>
-          </div>
-          {showRolePlan && realLphId && planRoles.length > 0 && (
-            <span className={`text-[10px] font-medium tabular-nums ${rpSum === 100 ? 'text-emerald-600' : 'text-amber-600'}`}>
-              Σ {rpSumRounded} %
-            </span>
-          )}
-        </button>
-
-        {showRolePlan && (
-          <div className="px-5 pb-4 border-t border-slate-100">
-            {activeLph == null || !realLphId ? (
-              <p className="py-4 text-xs text-slate-400">Bitte zuerst eine Leistungsphase mit Budgetzeile wählen.</p>
-            ) : (
-              <div className="pt-3 space-y-3 max-w-md">
-                {/* Bereich */}
-                <div className="flex items-center gap-2">
-                  <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Bereich</label>
-                  <select value={rpAreaId} onChange={e => { setRpAreaId(e.target.value); setRpSavedMsg(null) }}
-                    className="text-sm border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-700 outline-none focus:border-slate-400">
-                    <option value="">Gesamt / ohne Bereich</option>
-                    {planAreas.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                  </select>
-                </div>
-
-                {/* Rollen */}
-                {rpLoading ? (
-                  <p className="text-xs text-slate-400 py-2">Laden…</p>
-                ) : planRoles.length === 0 ? (
-                  <p className="text-xs text-slate-400 py-2">Keine aktiven Planungsrollen. (TL legt sie über „Planungsrollen“ an.)</p>
-                ) : (
-                  <div className="rounded-lg border border-slate-200 divide-y divide-slate-100">
-                    {planRoles.map(r => (
-                      <div key={r.id} className="flex items-center gap-2 px-3 py-1.5">
-                        <span className="flex-1 text-sm text-slate-700">{r.name}</span>
-                        <div className="flex items-center gap-1">
-                          <input type="text" inputMode="decimal" value={rpShares[r.id] ?? ''}
-                            onChange={e => { setRpShares(s => ({ ...s, [r.id]: e.target.value })); setRpSavedMsg(null) }}
-                            placeholder="0"
-                            className="w-16 text-sm text-right border border-slate-200 rounded-md px-2 py-1 outline-none focus:border-slate-400 text-slate-800 tabular-nums" />
-                          <span className="text-xs text-slate-400">%</span>
-                        </div>
-                      </div>
-                    ))}
-                    <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-50">
-                      <span className="flex-1 text-xs font-semibold text-slate-500">Summe</span>
-                      <span className={`text-xs font-semibold tabular-nums ${rpSum === 100 ? 'text-emerald-600' : 'text-amber-600'}`}>
-                        {rpSumRounded} %
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                {planRoles.length > 0 && rpSum !== 100 && (
-                  <p className="text-[11px] text-amber-600">Hinweis: Summe ist nicht 100 % — Speichern ist trotzdem möglich.</p>
-                )}
-                {rpError && <p className="text-[11px] text-red-500">{rpError}</p>}
-
-                <div className="flex items-center gap-2">
-                  <button onClick={handleSaveRolePlan} disabled={rpSaving || planRoles.length === 0}
-                    className="px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 disabled:opacity-50">
-                    {rpSaving ? 'Speichern…' : 'Speichern'}
-                  </button>
-                  {rpSavedMsg && <span className="text-[11px] text-emerald-600">{rpSavedMsg}</span>}
-                </div>
-
-                <p className="text-[10px] text-slate-400">
-                  Soll-/Planungsmodell · keine echten Mitarbeiterzuweisungen, keine Mitarbeiter-Stundensätze.
-                </p>
-
-                {/* ── Soll-Rollenbedarf (read-only, 6B-2C) ── */}
-                <div className="pt-2 border-t border-slate-100">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Soll-Rollenbedarf</p>
-                    <span className="text-[10px] text-slate-400">
-                      {lphWeeks ? `${lphWeeks} Wo` : 'kein Balken'} · {totalBudget > 0 ? fmtEur(totalBudget) : 'kein Budget'}
-                    </span>
-                  </div>
-
-                  {totalBudget <= 0 ? (
-                    <p className="text-[11px] text-slate-400 py-1">Kein LPH-Budget vorhanden.</p>
-                  ) : sollRows.length === 0 ? (
-                    <p className="text-[11px] text-slate-400 py-1">Noch keine Rollenverteilung gepflegt.</p>
-                  ) : (
-                    <>
-                      <div className="rounded-lg border border-slate-200 overflow-hidden">
-                        <div className="flex items-center bg-slate-50 px-2.5 py-1 border-b border-slate-100 text-[9px] font-semibold text-slate-400 uppercase tracking-wide">
-                          <span className="flex-1">Rolle</span>
-                          <span className="w-10 text-right">%</span>
-                          <span className="w-14 text-right">€/h</span>
-                          <span className="w-20 text-right">Budget</span>
-                          <span className="w-14 text-right">Soll h</span>
-                          <span className="w-16 text-right">h/Wo</span>
-                        </div>
-                        <div className="divide-y divide-slate-100">
-                          {sollRows.map((row) => (
-                            <div key={row.id} className="flex items-center px-2.5 py-1 text-[11px] text-slate-700 tabular-nums">
-                              <span className="flex-1 truncate">{row.name}</span>
-                              <span className="w-10 text-right">{Math.round(row.pct * 10) / 10}</span>
-                              {row.rate > 0 ? (
-                                <>
-                                  <span className="w-14 text-right">{fmtEur(row.rate)}</span>
-                                  <span className="w-20 text-right">{fmtEur(row.rollenBudget)}</span>
-                                  <span className="w-14 text-right">{row.sollStunden != null ? `${Math.round(row.sollStunden * 10) / 10} h` : '—'}</span>
-                                  <span className="w-16 text-right">{row.hProWoche != null ? `${Math.round(row.hProWoche * 10) / 10} h` : '—'}</span>
-                                </>
-                              ) : (
-                                <span className="flex-1 text-right text-amber-600">kein Planungssatz</span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                      {rpSum !== 100 && (
-                        <p className="mt-1 text-[10px] text-amber-600">
-                          Summe ist nicht 100 % — Rest ist unverplant bzw. überplant.
-                        </p>
-                      )}
-                      {lphWeeks == null && (
-                        <p className="mt-1 text-[10px] text-slate-400">
-                          Kein Terminbalken gesetzt — „h/Wo" wird erst mit Balken berechnet.
-                        </p>
-                      )}
-                    </>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
       {/* ── INTEGRIERTE ANSICHT: Gantt + Matrix ── */}
@@ -1073,16 +1075,24 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
               </div>
             ) : visibleSorted.map(s => {
               const isSel = activeLph === s.lph_number
+              const isExpanded = isSel && expandedLph === s.lph_number
               const color = lphColor(s.lph_number)
               return (
-                <div key={s.lph_id}
+                <Fragment key={s.lph_id}>
+                <div
                   className={`flex items-center border-b border-slate-100 cursor-pointer ${isSel ? 'bg-slate-50' : ''}`}
-                  onClick={() => setSelectedLph(s.lph_number)}>
+                  onClick={() => { setSelectedLph(s.lph_number); setExpandedLph(cur => cur === s.lph_number ? cur : null) }}>
                   <div style={{ width: EMP_COL, minWidth: EMP_COL }} className="px-5 py-1.5 flex items-center gap-2 border-r border-slate-100">
+                    {/* 7D: Chevron klappt die Rollenverteilung dieser LPH auf/zu. */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setSelectedLph(s.lph_number); setExpandedLph(cur => cur === s.lph_number ? null : s.lph_number) }}
+                      title="Rollenverteilung"
+                      className="shrink-0 -ml-1 p-0.5 rounded hover:bg-slate-200/70 transition-colors">
+                      <ChevronRight className={`h-3.5 w-3.5 text-slate-400 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                    </button>
                     <div className={`h-2 w-2 rounded-full shrink-0 ${color}`} />
                     <p className="text-xs font-semibold text-slate-700 shrink-0">LPH {s.lph_number}</p>
                     <p className="text-[10px] text-slate-400 truncate">{LPH_LABELS[s.lph_number]}</p>
-                    {isSel && <ChevronRight className="h-3 w-3 text-slate-400 ml-auto shrink-0" />}
                   </div>
                   <div style={{ width: CAP_COL, minWidth: CAP_COL }} className="border-r border-slate-100" />
                   {/* minHeight 28: gibt dem absolut positionierten GanttBar wieder eine
@@ -1134,6 +1144,9 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                     </div>
                   </div>
                 </div>
+                {/* 7D: Rollenverteilung direkt unter der aufgeklappten LPH-Zeile. */}
+                {isExpanded && renderRolePanel()}
+                </Fragment>
               )
             })}
 
