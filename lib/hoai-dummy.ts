@@ -64,3 +64,24 @@ export function calcHoaiDummy(
   }))
   return { anrechenbareKosten: kosten, honorarPct: pct, totalHonorar, rows }
 }
+
+// Liefert das DUMMY-Honorar (= Budget) fuer GENAU EINE LPH-Nummer aus einem
+// Szenario (anrechenbare Kosten + Honorarsatz). Reine Wiederverwendung von
+// calcHoaiDummy() -> die LPH-Verteilung (HOAI_DUMMY_LPH_SPLIT) wird NICHT
+// dupliziert. Vorbereitung fuer Paket 9B-1 (Budgetbasis 'hoai'); noch NICHT in
+// der UI/Sollberechnung genutzt.
+//
+// Beispiel: hoaiBudgetForLph(1_000_000, 12, 2)
+//   = 1.000.000 × 12 % × 9 % (LPH 2) = 10.800 €
+//
+// LPH-Nummer nicht im Split (z. B. ungueltig) -> 0.
+export function hoaiBudgetForLph(
+  anrechenbareKosten: number,
+  honorarPct: number,
+  lphNumber: number
+): number {
+  const row = calcHoaiDummy(anrechenbareKosten, honorarPct).rows.find(
+    (r) => r.lph === lphNumber
+  )
+  return row ? row.honorar : 0
+}

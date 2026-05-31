@@ -14,6 +14,8 @@ interface GanttBarProps {
   color: string
   istHours?: number         // IST-Stunden (aus Mitarbeiter-Matrix, KW-verteilt)
   sollHours?: number        // SOLL-Stunden (Soll-Modell: budget × share / rate)
+  hasSollBudget?: boolean    // 9C: false = kein wirksames Sollbudget -> "kein Budget"/"—"
+  tooltip?: string           // 9C: Hover-Text (LPH · IST · SOLL · Budgetbasis)
   onChange: (lphId: string, startKw: number, endKw: number, planYear: number) => void
   onSave: (lphId: string, startKw: number, endKw: number, planYear: number) => void
 }
@@ -25,7 +27,7 @@ interface GanttBarProps {
 // erscheinen weiterhin als Default-Balken zum Anlegen per Drag.
 export default function GanttBar({
   lphId, lphNumber, weeks, planYear, colWidth, startKw, endKw, color,
-  istHours = 0, sollHours = 0, onChange, onSave,
+  istHours = 0, sollHours = 0, hasSollBudget = true, tooltip, onChange, onSave,
 }: GanttBarProps) {
   const [drag, setDrag] = useState<null | { mode: 'move' | 'resize-l' | 'resize-r'; startX: number; origStart: number; origEnd: number }>(null)
   // Zuletzt emittierte Werte — vermeidet stale-closure beim mouseup/onSave.
@@ -116,13 +118,15 @@ export default function GanttBar({
         <div
           className={`absolute top-1 bottom-1 rounded-md ${color} cursor-move flex items-center justify-between group`}
           style={{ left: `${left}px`, width: `${width}px` }}
+          title={tooltip}
           onMouseDown={onMouseDown('move')}
         >
           <div onMouseDown={onMouseDown('resize-l')}
             className="w-2 h-full cursor-ew-resize hover:bg-black/10 rounded-l-md" />
-          {/* Beschriftung: LPH-Nummer + IST/SOLL-Stunden (erste Zahl = IST, zweite = SOLL). */}
+          {/* 9C: Beschriftung LPH · IST / SOLL. Ohne wirksames Sollbudget zeigt der
+              SOLL-Teil "kein Budget" (bzw. "—" bei schmalem Balken) statt 0h. */}
           <span className="text-[10px] text-white/90 font-medium px-1 truncate pointer-events-none">
-            LPH {lphNumber} · {Math.round(istHours)}h / {Math.round(sollHours)}h
+            LPH {lphNumber} · {Math.round(istHours)}h / {hasSollBudget ? `${Math.round(sollHours)}h` : (width >= 150 ? 'kein Budget' : '—')}
           </span>
           <div onMouseDown={onMouseDown('resize-r')}
             className="w-2 h-full cursor-ew-resize hover:bg-black/10 rounded-r-md" />

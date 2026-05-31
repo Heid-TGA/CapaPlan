@@ -178,8 +178,8 @@ export default function HoaiCalculatorModal({ projectId, projectName, onClose }:
           <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
             <p className="text-[11px] text-amber-700">
               Vereinfachter Planungs-/Dummy-Rechner für TGA — <strong>keine rechtsverbindliche
-              HOAI-Berechnung</strong>. Gespeicherte Szenarien sind reine Planungswerte und werden
-              <strong> nicht</strong> in Projektbudgets übernommen.
+              HOAI-Berechnung</strong>. Gespeicherte Szenarien sind reine Schätzwerte und
+              überschreiben <strong>keine Abacus-Budgets</strong>.
             </p>
           </div>
 
@@ -359,8 +359,9 @@ export default function HoaiCalculatorModal({ projectId, projectName, onClose }:
           </div>
 
           <p className="text-[10px] text-slate-400">
-            Aus dem Honorar je LPH wird später die rollenbasierte Soll-Kapazität abgeleitet (Paket 6B).
-            Keine Übernahme in Budgets, keine echte HOAI-Berechnung.
+            Gespeicherte HOAI-Szenarien können in der Projektplanung als Budgetbasis für einzelne
+            LPH verwendet werden. Es handelt sich weiterhin um eine Dummy-/Schätzlogik; Abacus-Budgets
+            werden dadurch nicht überschrieben.
           </p>
         </div>
       </div>

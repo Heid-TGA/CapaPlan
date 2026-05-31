@@ -11,6 +11,9 @@ import { loadPlanningRoles, type PlanningRole } from '@/app/actions/planning-rol
 import { loadLphRolePlan, saveLphRolePlan, loadProjectRolePlans, type LphRoleShare } from '@/app/actions/lph-role-plan'
 import { loadProjectBudgetAreas, ensureDefaultBudgetAreas, type BudgetArea } from '@/app/actions/budget-areas'
 import { getDefaultGroupForLph, loadRolePlanDefaults, type RolePlanDefault } from '@/app/actions/role-plan-defaults'
+import { loadProjectBudgetBases, saveLphBudgetBasis, resetLphBudgetBasis, type LphBudgetBasis, type BudgetBasisSource, type SaveLphBudgetBasisInput } from '@/app/actions/lph-budget-basis'
+import { loadHoaiScenarios, type HoaiScenario } from '@/app/actions/hoai-scenarios'
+import { hoaiBudgetForLph } from '@/lib/hoai-dummy'
 import { groupKeyForLph, ROLE_PLAN_DEFAULT_GROUP_LABELS } from '@/lib/role-plan-defaults'
 import { ALL_LPH, LPH_LABELS } from '@/lib/planning-phases'
 import { CALC_PROFILES, CALC_PROFILE_LABELS, isCalcProfile, type CalcProfile } from '@/lib/calc-profile'
@@ -70,6 +73,15 @@ function parseSharePct(raw: string | undefined): number {
   const n = parseFloat(raw.replace(',', '.'))
   if (!Number.isFinite(n)) return 0
   return Math.min(100, Math.max(0, n))
+}
+// Euro-Eingabe (de) -> number. Tausenderpunkte/€/Leerzeichen raus, Komma als
+// Dezimaltrenner. Leer/ungueltig/negativ -> null (Speichern wird verhindert).
+function parseManualBudget(raw: string | undefined): number | null {
+  if (raw == null) return null
+  const cleaned = raw.replace(/[€\s]/g, '').replace(/\./g, '').replace(',', '.')
+  if (cleaned === '') return null
+  const n = Number(cleaned)
+  return Number.isFinite(n) && n >= 0 ? n : null
 }
 
 // ── Haupt-Komponente ───────────────────────────────────────────────────────────
@@ -154,6 +166,20 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // 7C: „Default anwenden" — uebernimmt die Default-Vorlage in die aktive LPH.
   const [rpApplying, setRpApplying] = useState(false)
 
+  // ── Budgetbasis je LPH (9B-2) ───────────────────────────────────────────────
+  // Sollplanungs-Layer über lph_budget_basis. Schreibt NIEMALS in
+  // project_lph_budgets.budget_eur. budgetBases (keyed by lph_id) speist sowohl
+  // den Budgetbasis-Selektor der aktiven LPH als auch das effektive SOLL-Budget
+  // ALLER LPH-Balken — daher projektweit einmalig geladen (kein N+1).
+  const [budgetBases, setBudgetBases] = useState<Record<string, LphBudgetBasis>>({})
+  const [hoaiScenarios, setHoaiScenarios] = useState<HoaiScenario[]>([])
+  const [bbSource, setBbSource] = useState<BudgetBasisSource>('abacus')
+  const [bbScenarioId, setBbScenarioId] = useState<string>('')
+  const [bbManual, setBbManual] = useState<string>('') // €-String (manuell)
+  const [bbSaving, setBbSaving] = useState(false)
+  const [bbError, setBbError] = useState<string | null>(null)
+  const [bbSavedMsg, setBbSavedMsg] = useState<string | null>(null)
+
   // Zeitachsen-Navigation (6B-0): Startwoche des sichtbaren Fensters (WeekRef).
   const [windowStart, setWindowStart] = useState<WeekRef>(() => currentIsoWeek())
 
@@ -205,10 +231,12 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
   async function loadAll(project: Project) {
     try {
-      const [alloc, term, rolePlansRes] = await Promise.all([
+      const [alloc, term, rolePlansRes, basesRes, scenRes] = await Promise.all([
         fetchAllocations(project),
         loadTerminplan(project.id),
         loadProjectRolePlans(project.id),
+        loadProjectBudgetBases(project.id),
+        loadHoaiScenarios(project.id),
       ])
       // Budgetstatus erst nach dem Terminplan: braucht die lph_ids der Schedules
       // (id-basierter RPC, Paket 8D).
@@ -218,6 +246,11 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       setSchedules(term.schedules)
       setMilestones(term.milestones)
       setRolePlans(rolePlansRes.success ? rolePlansRes.data : [])
+      // 9B-2: Budgetbasen je LPH (lph_id -> Basis). Fehlende LPH = Default 'abacus'.
+      const basesMap: Record<string, LphBudgetBasis> = {}
+      if (basesRes.success) for (const b of basesRes.data) basesMap[b.lph_id] = b
+      setBudgetBases(basesMap)
+      setHoaiScenarios(scenRes.success ? scenRes.data : [])
 
       // Default sichtbare LPH: terminierte ∪ mit Stunden; sonst alle budgetierten.
       const scheduled = term.schedules.filter(s => s.start_kw != null && s.end_kw != null).map(s => s.lph_number)
@@ -240,6 +273,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   async function handleProjectSelect(project: Project) {
     setSelectedProject(project)
     setLphBudgets({}); setAllocations({}); setSchedules([]); setMilestones([]); setRolePlans([])
+    setBudgetBases({}); setHoaiScenarios([]); setBbError(null); setBbSavedMsg(null)
     setVisibleLph(new Set()); setSelectedLph(null); setShowLphPicker(false)
     setExternalTrades([]); setShowEtForm(false); setEtError(null)
     setScheduleError(null)
@@ -424,6 +458,71 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       .finally(() => { if (!cancelled) setRpLoading(false) })
     return () => { cancelled = true }
   }, [realLphId, rpAreaId])
+
+  // 9B-2: Budgetbasis-Formular der aktiven LPH aus dem geladenen budgetBases-Map
+  // synchronisieren (keine eigene Server-Runde — alles ist projektweit geladen).
+  // Fehlende Zeile => Default 'abacus'.
+  useEffect(() => {
+    setBbError(null); setBbSavedMsg(null)
+    const basis = realLphId ? budgetBases[realLphId] : undefined
+    if (!basis || basis.source_type === 'abacus') {
+      setBbSource('abacus'); setBbScenarioId(''); setBbManual('')
+    } else if (basis.source_type === 'hoai') {
+      setBbSource('hoai'); setBbScenarioId(basis.hoai_scenario_id ?? ''); setBbManual('')
+    } else {
+      setBbSource('manual'); setBbScenarioId('')
+      // de-Format ohne Tausenderpunkte, damit parseManualBudget sauber zurückliest.
+      setBbManual(basis.manual_budget_eur != null
+        ? new Intl.NumberFormat('de-DE', { useGrouping: false, maximumFractionDigits: 2 }).format(basis.manual_budget_eur)
+        : '')
+    }
+  }, [realLphId, budgetBases])
+
+  // 9B-2: Budgetbasis speichern. Validiert quellenabhaengig; Server prueft
+  // zusaetzlich Projekt-/Bereichszugehoerigkeit des HOAI-Szenarios und nullt
+  // nicht passende Felder. Schreibt NICHT in project_lph_budgets.budget_eur.
+  async function handleSaveBudgetBasis() {
+    if (!realLphId) return
+    let payload: SaveLphBudgetBasisInput
+    if (bbSource === 'hoai') {
+      if (!bbScenarioId) { setBbError('Bitte ein HOAI-Szenario wählen.'); return }
+      payload = { source_type: 'hoai', hoai_scenario_id: bbScenarioId }
+    } else if (bbSource === 'manual') {
+      const n = parseManualBudget(bbManual)
+      if (n == null) { setBbError('Bitte ein gültiges Budget ≥ 0 € eingeben.'); return }
+      payload = { source_type: 'manual', manual_budget_eur: n }
+    } else {
+      payload = { source_type: 'abacus' }
+    }
+    setBbSaving(true); setBbError(null); setBbSavedMsg(null)
+    try {
+      const res = await saveLphBudgetBasis(realLphId, payload)
+      if (!res.success || !res.data) { setBbError(res.message || 'Speichern fehlgeschlagen'); return }
+      setBudgetBases(prev => ({ ...prev, [realLphId]: res.data! }))
+      setBbSavedMsg('Gespeichert')
+    } catch (e) {
+      setBbError(e instanceof Error ? e.message : 'Speichern fehlgeschlagen')
+    } finally {
+      setBbSaving(false)
+    }
+  }
+
+  // 9B-2: Budgetbasis loeschen -> faellt auf Default 'abacus' zurueck.
+  async function handleResetBudgetBasis() {
+    if (!realLphId) return
+    setBbSaving(true); setBbError(null); setBbSavedMsg(null)
+    try {
+      const res = await resetLphBudgetBasis(realLphId)
+      if (!res.success) { setBbError(res.message || 'Zurücksetzen fehlgeschlagen'); return }
+      setBudgetBases(prev => { const next = { ...prev }; delete next[realLphId]; return next })
+      setBbSource('abacus'); setBbScenarioId(''); setBbManual('')
+      setBbSavedMsg('Auf Abacus-Budget zurückgesetzt')
+    } catch (e) {
+      setBbError(e instanceof Error ? e.message : 'Zurücksetzen fehlgeschlagen')
+    } finally {
+      setBbSaving(false)
+    }
+  }
 
   async function handleSaveRolePlan() {
     if (!realLphId) return
@@ -754,6 +853,52 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const projectUtilizationPct = projectBudgetTotal > 0 ? Math.min(100, Math.round(projectAllocatedTotal / projectBudgetTotal * 100)) : 0
   const projectProgressColor = projectUtilizationPct > 85 ? 'bg-red-400' : projectUtilizationPct > 60 ? 'bg-amber-400' : 'bg-emerald-400'
 
+  // ── Effektives SOLL-Budget je LPH (9B-2) ────────────────────────────────────
+  // Wählt die Budgetbasis dieser LPH-Zeile (lph_budget_basis), OHNE
+  // project_lph_budgets.budget_eur zu verändern:
+  //   abacus -> Abacus-/Import-Budget (Parameter abacusBudget)
+  //   manual -> manual_budget_eur (0 als sauberer Default)
+  //   hoai   -> hoaiBudgetForLph(Szenario, lph_number); fehlt das Szenario
+  //             (gelöscht/kein Zugriff), wird 0 zurückgegeben (kein Crash, kein
+  //             stilles Abacus-Fallback — der Selektor zeigt dann einen Hinweis).
+  // Dieses effektive Budget speist Soll-Rollenbedarf UND die SOLL-Zahl der
+  // LPH-Balken (sollByLph). Die IST-/Verbrauchs-Karten bleiben Abacus-bezogen.
+  function effectiveBudget(lphId: string | null, lphNumber: number | null, abacusBudget: number): number {
+    if (!lphId) return abacusBudget
+    const basis = budgetBases[lphId]
+    if (!basis || basis.source_type === 'abacus') return abacusBudget
+    if (basis.source_type === 'manual') return basis.manual_budget_eur ?? 0
+    // hoai
+    const sc = basis.hoai_scenario_id ? hoaiScenarios.find(s => s.id === basis.hoai_scenario_id) : undefined
+    if (!sc || lphNumber == null) return 0
+    return hoaiBudgetForLph(sc.anrechenbare_kosten, sc.honorar_pct, lphNumber)
+  }
+  // Effektives Budget der aktiven LPH (für den Soll-Rollenbedarf rechts im Panel).
+  const activeEffectiveBudget = effectiveBudget(realLphId, activeLph, totalBudget)
+
+  // 9C: Einheitliches Budgetbasis-Label einer LPH-Zeile (überall identisch):
+  //   abacus -> 'Abacus-Budget' · hoai -> 'HOAI · <Szenario>' · manual -> 'Manuelles Budget'.
+  function basisLabelFor(lphId: string | null): string {
+    const basis = lphId ? budgetBases[lphId] : undefined
+    const src: BudgetBasisSource = basis?.source_type ?? 'abacus'
+    if (src === 'manual') return 'Manuelles Budget'
+    if (src === 'hoai') {
+      const sc = basis?.hoai_scenario_id ? hoaiScenarios.find(s => s.id === basis.hoai_scenario_id) : undefined
+      return `HOAI · ${sc?.label ?? 'Szenario fehlt'}`
+    }
+    return 'Abacus-Budget'
+  }
+
+  // 9C: Hover-Tooltip eines LPH-Balkens. Zeigt IST, SOLL bzw. "kein Sollbudget"
+  // und die Budgetbasis; bei HOAI/Manuell den Hinweis, dass Abacus unverändert bleibt.
+  function barTooltip(lphId: string, lphNumber: number, ist: number, soll: number, hasBudget: boolean): string {
+    const src: BudgetBasisSource = budgetBases[lphId]?.source_type ?? 'abacus'
+    const sollPart = hasBudget ? `SOLL ${Math.round(soll)}h` : 'kein Sollbudget'
+    let t = `LPH ${lphNumber} · IST ${Math.round(ist)}h · ${sollPart} · Budgetbasis: ${basisLabelFor(lphId)}`
+    if (src !== 'abacus') t += ' · Abacus-Budget bleibt unverändert'
+    return t
+  }
+
   // ── Soll-Rollenbedarf (6B-2C, read-only) ────────────────────────────────────
   // Reine Planungswerte, abgeleitet aus LPH-Budget (project_lph_budgets.budget_eur)
   // + Rollenverteilung + interner Planungssatz (planning_roles.rate_eur_per_hour).
@@ -790,7 +935,8 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       const pct = usingDefaultForActive
         ? (activeDefaultPct!.get(r.id) ?? 0)
         : parseSharePct(rpShares[r.id])
-      const rollenBudget = totalBudget * pct / 100
+      // 9B-2: SOLL aus dem effektiven Budget der gewählten Budgetbasis.
+      const rollenBudget = activeEffectiveBudget * pct / 100
       const rate = r.rate_eur_per_hour
       const sollStunden = rate > 0 ? rollenBudget / rate : null
       const hProWoche = sollStunden != null && lphWeeks && lphWeeks > 0 ? sollStunden / lphWeeks : null
@@ -807,7 +953,9 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // Budgetstatus dieser konkreten LPH-Zeile.
   const sollByLph: Record<string, number> = {}
   for (const s of schedules) {
-    const budget = lphBudgets[s.lph_id]?.budget_eur ?? s.budget_eur ?? 0
+    // 9B-2: effektives Budget je LPH (Budgetbasis-Layer) statt fix Abacus.
+    const abacusBudget = lphBudgets[s.lph_id]?.budget_eur ?? s.budget_eur ?? 0
+    const budget = effectiveBudget(s.lph_id, s.lph_number, abacusBudget)
     if (budget <= 0) continue
     let soll = 0
     const own = rolePlans.filter(r => r.lph_id === s.lph_id && r.area_id === null && r.share_pct > 0)
@@ -928,6 +1076,36 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // Links: Prozentfelder (editierbar) · rechts: Soll-Rollenbedarf (read-only).
   // Nutzt unveraendert realLphId/rpShares/sollRows/handleSaveRolePlan (aktive LPH).
   function renderRolePanel() {
+    // 9B-2: Budgetbasis-Ableitungen der aktiven LPH (gespeicherte Basis + Entwurf).
+    const savedBasis = realLphId ? budgetBases[realLphId] : undefined
+    const savedBasisSource: BudgetBasisSource = savedBasis?.source_type ?? 'abacus'
+    const savedScenario = savedBasisSource === 'hoai' && savedBasis?.hoai_scenario_id
+      ? hoaiScenarios.find(s => s.id === savedBasis.hoai_scenario_id)
+      : undefined
+    const savedHoaiMissing = savedBasisSource === 'hoai' && !savedScenario
+    const savedBasisLabel = basisLabelFor(realLphId)
+    // Szenarien passend zum Bereich der LPH: gleicher Bereich ODER allgemein
+    // (area_id = null). Gleicher Bereich zuerst. Server lehnt Falschzuordnung ab.
+    const lphAreaId = activeSchedule?.area_id ?? null
+    const bbScenarios = hoaiScenarios
+      .filter(s => s.area_id === lphAreaId || s.area_id === null)
+      .sort((a, b) => {
+        const am = lphAreaId !== null && a.area_id === lphAreaId ? 0 : 1
+        const bm = lphAreaId !== null && b.area_id === lphAreaId ? 0 : 1
+        return am - bm
+      })
+    const bbSelectedScenario = bbScenarioId ? hoaiScenarios.find(s => s.id === bbScenarioId) : undefined
+    const bbDerivedBudget = bbSelectedScenario && activeLph != null
+      ? hoaiBudgetForLph(bbSelectedScenario.anrechenbare_kosten, bbSelectedScenario.honorar_pct, activeLph)
+      : null
+    const bbManualValid = parseManualBudget(bbManual) != null
+    // 9C: Weicht die im Formular gewählte Basis von der gespeicherten ab?
+    const draftMatchesSaved =
+      bbSource === savedBasisSource &&
+      (bbSource !== 'hoai' || bbScenarioId === (savedBasis?.hoai_scenario_id ?? '')) &&
+      (bbSource !== 'manual' || parseManualBudget(bbManual) === (savedBasis?.manual_budget_eur ?? null))
+    const bbDirty = !draftMatchesSaved
+
     return (
       <div className="border-b border-slate-100 bg-slate-50/50"
         style={{ width: EMP_COL + CAP_COL + windowWeeks.length * COL_WIDTH }}>
@@ -935,6 +1113,104 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
           <p className="px-5 py-4 text-xs text-slate-400">Bitte zuerst eine Leistungsphase mit Budgetzeile wählen.</p>
         ) : (
           <div className="px-5 py-4 grid grid-cols-1 lg:grid-cols-2 gap-5 items-start">
+
+            {/* ── BUDGETBASIS (9B-2): über beiden Spalten ── */}
+            <div className="lg:col-span-2 space-y-2.5 rounded-lg border border-slate-200 bg-white px-3.5 py-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Budgetbasis · LPH {activeLph}</p>
+                <span className="text-[11px] text-slate-500">
+                  Gespeichert: <span className="font-medium text-slate-700">{savedBasisLabel}</span>
+                </span>
+              </div>
+
+              {/* Auswahl der Quelle */}
+              <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 p-0.5 w-fit">
+                {(['abacus', 'hoai', 'manual'] as BudgetBasisSource[]).map(src => (
+                  <button key={src}
+                    onClick={() => { setBbSource(src); setBbSavedMsg(null); setBbError(null) }}
+                    className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${bbSource === src ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-white'}`}>
+                    {src === 'abacus' ? 'Abacus-Budget' : src === 'hoai' ? 'HOAI-Szenario' : 'Manuelles Budget'}
+                  </button>
+                ))}
+              </div>
+
+              {/* Quellen-spezifische Felder */}
+              {bbSource === 'abacus' && (
+                <p className="text-[11px] text-slate-500">
+                  Abacus-Budget dieser LPH:{' '}
+                  <span className="font-medium text-slate-700 tabular-nums">{fmtEur(totalBudget)}</span>
+                </p>
+              )}
+
+              {bbSource === 'hoai' && (
+                bbScenarios.length === 0 ? (
+                  <p className="text-[11px] text-slate-400">
+                    Keine passenden HOAI-Szenarien für diesen Bereich. Über „HOAI-Rechner" anlegen.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    <select value={bbScenarioId}
+                      onChange={e => { setBbScenarioId(e.target.value); setBbSavedMsg(null); setBbError(null) }}
+                      className="text-sm border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-700 outline-none focus:border-slate-400 w-full max-w-xs">
+                      <option value="">Szenario wählen…</option>
+                      {bbScenarios.map(s => (
+                        <option key={s.id} value={s.id}>
+                          {s.label}{s.area_id === null ? ' · allgemein' : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {bbDerivedBudget != null && (
+                      <p className="text-[11px] text-slate-500">
+                        Abgeleitetes LPH-Budget:{' '}
+                        <span className="font-medium text-slate-700 tabular-nums">{fmtEur(bbDerivedBudget)}</span>
+                        <span className="text-slate-400"> · {bbSelectedScenario?.honorar_pct}% v. {fmtEur(bbSelectedScenario?.anrechenbare_kosten ?? 0)}</span>
+                      </p>
+                    )}
+                  </div>
+                )
+              )}
+
+              {bbSource === 'manual' && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Budget €</label>
+                  <input type="text" inputMode="decimal" value={bbManual}
+                    onChange={e => { setBbManual(e.target.value); setBbSavedMsg(null); setBbError(null) }}
+                    placeholder="z. B. 12.000"
+                    className="w-32 text-sm text-right border border-slate-200 rounded-md px-2 py-1 outline-none focus:border-slate-400 text-slate-800 tabular-nums" />
+                  {bbManual.trim() !== '' && !bbManualValid && (
+                    <span className="text-[11px] text-red-500">Bitte Zahl ≥ 0 eingeben.</span>
+                  )}
+                </div>
+              )}
+
+              {bbSource !== 'abacus' && (
+                <p className="text-[10px] text-slate-400">Abacus-Budget bleibt unverändert.</p>
+              )}
+
+              {savedHoaiMissing && (
+                <p className="text-[11px] text-red-500">
+                  Das gespeicherte HOAI-Szenario wurde nicht gefunden (evtl. gelöscht). Bitte neu wählen oder auf Abacus zurücksetzen.
+                </p>
+              )}
+              {bbError && <p className="text-[11px] text-red-500">{bbError}</p>}
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button onClick={handleSaveBudgetBasis}
+                  disabled={bbSaving || (bbSource === 'manual' && !bbManualValid) || (bbSource === 'hoai' && !bbScenarioId)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 disabled:opacity-50">
+                  {bbSaving ? 'Speichern…' : 'Budgetbasis speichern'}
+                </button>
+                {savedBasisSource !== 'abacus' && (
+                  <button onClick={handleResetBudgetBasis} disabled={bbSaving}
+                    className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 text-xs font-medium hover:bg-slate-50 hover:border-slate-300 disabled:opacity-50">
+                    Zurück auf Abacus-Budget
+                  </button>
+                )}
+                {bbSavedMsg
+                  ? <span className="text-[11px] text-emerald-600">{bbSavedMsg}</span>
+                  : bbDirty && <span className="text-[11px] text-amber-600">Auswahl noch nicht gespeichert</span>}
+              </div>
+            </div>
 
             {/* ── LINKS: Rollenverteilung (Prozente, editierbar) ── */}
             <div className="space-y-3 max-w-md">
@@ -1023,12 +1299,15 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
               <div className="flex items-center justify-between mb-1.5">
                 <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Soll-Rollenbedarf</p>
                 <span className="text-[10px] text-slate-400">
-                  {lphWeeks ? `${lphWeeks} Wo` : 'kein Balken'} · {totalBudget > 0 ? fmtEur(totalBudget) : 'kein Budget'}
+                  {lphWeeks ? `${lphWeeks} Wo` : 'kein Balken'} · {activeEffectiveBudget > 0 ? fmtEur(activeEffectiveBudget) : 'kein Budget'}
                 </span>
               </div>
+              <p className="text-[10px] text-slate-500 mb-1.5">
+                Budgetbasis: <span className="font-medium text-slate-700">{savedBasisLabel}</span>
+              </p>
 
-              {totalBudget <= 0 ? (
-                <p className="text-[11px] text-slate-400 py-1">Kein LPH-Budget vorhanden.</p>
+              {activeEffectiveBudget <= 0 ? (
+                <p className="text-[11px] text-slate-400 py-1">Für diese LPH ist kein wirksames Sollbudget hinterlegt.</p>
               ) : sollRows.length === 0 ? (
                 <p className="text-[11px] text-slate-400 py-1">Noch keine Rollenverteilung gepflegt.</p>
               ) : (
@@ -1299,6 +1578,11 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
               const isSel = activeLph === s.lph_number
               const isExpanded = isSel && expandedLph === s.lph_number
               const color = lphColor(s.lph_number)
+              // 9C: hat diese LPH ein wirksames Sollbudget? (gleiche Logik wie sollByLph)
+              const barAbacusBudget = lphBudgets[s.lph_id]?.budget_eur ?? s.budget_eur ?? 0
+              const barHasBudget = effectiveBudget(s.lph_id, s.lph_number, barAbacusBudget) > 0
+              const barIst = istByLph[s.lph_id] ?? 0
+              const barSoll = sollByLph[s.lph_id] ?? 0
               return (
                 <Fragment key={s.lph_id}>
                 <div
@@ -1335,8 +1619,10 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                       startKw={s.start_kw}
                       endKw={s.end_kw}
                       color={color}
-                      istHours={istByLph[s.lph_id] ?? 0}
-                      sollHours={sollByLph[s.lph_id] ?? 0}
+                      istHours={barIst}
+                      sollHours={barSoll}
+                      hasSollBudget={barHasBudget}
+                      tooltip={barTooltip(s.lph_id, s.lph_number, barIst, barSoll, barHasBudget)}
                       onChange={(id, start, end, planYear) => {
                         setSchedules(prev => prev.map(sc =>
                           sc.lph_id === id ? { ...sc, start_kw: start, end_kw: end, plan_year: planYear } : sc
