@@ -8,7 +8,7 @@ import { loadTerminplan, saveLphSchedule, saveMilestone, ensureLphBudgetRow, typ
 import { loadExternalTrades, createExternalTrade, deleteExternalTrade, type ExternalTrade } from '@/app/actions/external-trades'
 import { updateProjectCalcProfile } from '@/app/actions/project-settings'
 import { loadPlanningRoles, type PlanningRole } from '@/app/actions/planning-roles'
-import { loadLphRolePlan, saveLphRolePlan } from '@/app/actions/lph-role-plan'
+import { loadLphRolePlan, saveLphRolePlan, loadProjectRolePlans, type LphRoleShare } from '@/app/actions/lph-role-plan'
 import { loadProjectBudgetAreas, type BudgetArea } from '@/app/actions/budget-areas'
 import { ALL_LPH, LPH_LABELS } from '@/lib/planning-phases'
 import { CALC_PROFILES, CALC_PROFILE_LABELS, isCalcProfile, type CalcProfile } from '@/lib/calc-profile'
@@ -128,6 +128,8 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const [showRolePlan, setShowRolePlan] = useState(false)
   const [planRoles, setPlanRoles] = useState<PlanningRole[]>([])
   const [planAreas, setPlanAreas] = useState<BudgetArea[]>([])
+  // Alle Rollenverteilungen des Projekts (für SOLL-Stunden je LPH-Balken, 6B-2D).
+  const [rolePlans, setRolePlans] = useState<LphRoleShare[]>([])
   const [rpAreaId, setRpAreaId] = useState<string>('') // '' = Gesamt / ohne Bereich
   const [rpShares, setRpShares] = useState<Record<string, string>>({}) // roleId -> %-String
   const [rpLoading, setRpLoading] = useState(false)
@@ -177,15 +179,17 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
   async function loadAll(project: Project) {
     try {
-      const [budgets, alloc, term] = await Promise.all([
+      const [budgets, alloc, term, rolePlansRes] = await Promise.all([
         fetchLphBudgets(project),
         fetchAllocations(project),
         loadTerminplan(project.id),
+        loadProjectRolePlans(project.id),
       ])
       setLphBudgets(budgets)
       setAllocations(alloc.map)
       setSchedules(term.schedules)
       setMilestones(term.milestones)
+      setRolePlans(rolePlansRes.success ? rolePlansRes.data : [])
 
       // Default sichtbare LPH: terminierte ∪ mit Stunden; sonst alle budgetierten.
       const scheduled = term.schedules.filter(s => s.start_kw != null && s.end_kw != null).map(s => s.lph_number)
@@ -207,7 +211,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
   async function handleProjectSelect(project: Project) {
     setSelectedProject(project)
-    setLphBudgets({}); setAllocations({}); setSchedules([]); setMilestones([])
+    setLphBudgets({}); setAllocations({}); setSchedules([]); setMilestones([]); setRolePlans([])
     setVisibleLph(new Set()); setSelectedLph(null); setShowLphPicker(false)
     setExternalTrades([]); setShowEtForm(false); setEtError(null)
     setScheduleError(null)
@@ -340,6 +344,14 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       for (const s of res.data) m[s.role_id] = String(s.share_pct)
       setRpShares(m)
       setRpSavedMsg('Gespeichert')
+      // Projekt-Rollenverteilungen neu laden, damit die SOLL-Stunden auf den
+      // LPH-Balken (6B-2D) sofort die gespeicherten Werte widerspiegeln.
+      if (selectedProject) {
+        try {
+          const rp = await loadProjectRolePlans(selectedProject.id)
+          if (rp.success) setRolePlans(rp.data)
+        } catch { /* Balken-SOLL bleibt bis Reload auf altem Stand */ }
+      }
     } catch (e) {
       setRpError(e instanceof Error ? e.message : 'Speichern fehlgeschlagen')
     } finally {
@@ -599,6 +611,45 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       return { id: r.id, name: r.name, pct, rate, rollenBudget, sollStunden, hProWoche }
     })
     .filter((row) => row.pct > 0)
+
+  // ── IST/SOLL je LPH für die Balkenbeschriftung (6B-2D) ──────────────────────
+  // SOLL: budget_lph × Σ(share_pct/100 ÷ rate) über die Gesamt-Rollenverteilung
+  // (area_id = null), identisch zur bestehenden Soll-Rollenbedarf-Logik, aber je
+  // LPH. rate ≤ 0 → Rolle trägt 0 bei (sauber abgefangen).
+  const sollByLph: Record<number, number> = {}
+  for (const s of schedules) {
+    const budget = lphBudgets[s.lph_number]?.budget_eur ?? s.budget_eur ?? 0
+    if (budget <= 0) continue
+    let soll = 0
+    for (const r of rolePlans) {
+      if (r.lph_id !== s.lph_id || r.area_id !== null) continue
+      if (r.role_rate_eur_per_hour > 0) soll += budget * r.share_pct / 100 / r.role_rate_eur_per_hour
+    }
+    sollByLph[s.lph_number] = soll
+  }
+
+  // IST: Mitarbeiterstunden je KW werden gleichmäßig auf die in dieser KW aktiven,
+  // sichtbaren LPH-Balken verteilt (KW-genau). Datenbasis sind die bereits
+  // geladenen Matrix-Allocations → IST bezieht sich auf das sichtbare Fenster.
+  // Keine aktive LPH in einer KW → die Stunden dieser KW werden keiner LPH
+  // zugeordnet (übersprungen). Summen-erhaltend: Σ Anteile = Wochenstunden.
+  const istByLph: Record<number, number> = {}
+  for (const w of windowWeeks) {
+    const active = visibleSorted.filter(s =>
+      s.start_kw != null && s.end_kw != null &&
+      (s.plan_year == null || s.plan_year === w.year) &&
+      w.week >= s.start_kw && w.week <= s.end_kw
+    )
+    if (active.length === 0) continue
+    let totalW = 0
+    for (const key in allocations) {
+      const h = allocations[key]?.[w.week]?.hours
+      if (h) totalW += h
+    }
+    if (totalW === 0) continue
+    const share = totalW / active.length
+    for (const s of active) istByLph[s.lph_number] = (istByLph[s.lph_number] ?? 0) + share
+  }
 
   function commitEdit(empId: string, kw: number, value: string) {
     if (activeLph == null) { setEditCell(null); return }
@@ -987,6 +1038,8 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                       startKw={s.start_kw}
                       endKw={s.end_kw}
                       color={color}
+                      istHours={istByLph[s.lph_number] ?? 0}
+                      sollHours={sollByLph[s.lph_number] ?? 0}
                       onChange={(id, start, end, planYear) => {
                         setSchedules(prev => prev.map(sc =>
                           sc.lph_id === id ? { ...sc, start_kw: start, end_kw: end, plan_year: planYear } : sc
