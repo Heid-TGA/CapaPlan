@@ -10,6 +10,8 @@ import { updateProjectCalcProfile } from '@/app/actions/project-settings'
 import { loadPlanningRoles, type PlanningRole } from '@/app/actions/planning-roles'
 import { loadLphRolePlan, saveLphRolePlan, loadProjectRolePlans, type LphRoleShare } from '@/app/actions/lph-role-plan'
 import { loadProjectBudgetAreas, type BudgetArea } from '@/app/actions/budget-areas'
+import { getDefaultGroupForLph } from '@/app/actions/role-plan-defaults'
+import { groupKeyForLph, ROLE_PLAN_DEFAULT_GROUP_LABELS } from '@/lib/role-plan-defaults'
 import { ALL_LPH, LPH_LABELS } from '@/lib/planning-phases'
 import { CALC_PROFILES, CALC_PROFILE_LABELS, isCalcProfile, type CalcProfile } from '@/lib/calc-profile'
 import { isoWeekOf, mondayOfIsoWeek, currentIsoWeek, addWeeks, buildWeekWindow, type WeekRef, type WindowWeek } from '@/lib/calendar-weeks'
@@ -138,6 +140,8 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const [rpSaving, setRpSaving] = useState(false)
   const [rpError, setRpError] = useState<string | null>(null)
   const [rpSavedMsg, setRpSavedMsg] = useState<string | null>(null)
+  // 7C: „Default anwenden" — uebernimmt die Default-Vorlage in die aktive LPH.
+  const [rpApplying, setRpApplying] = useState(false)
 
   // Zeitachsen-Navigation (6B-0): Startwoche des sichtbaren Fensters (WeekRef).
   const [windowStart, setWindowStart] = useState<WeekRef>(() => currentIsoWeek())
@@ -358,6 +362,38 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       setRpError(e instanceof Error ? e.message : 'Speichern fehlgeschlagen')
     } finally {
       setRpSaving(false)
+    }
+  }
+
+  // 7C: Default-Vorlage der passenden LPH-Gruppe in die aktive LPH uebernehmen
+  // UND speichern (ueber das bestehende saveLphRolePlan). Erzeugt KEINE
+  // Mitarbeiterzuweisungen und schreibt NICHT in allocations.
+  async function handleApplyDefault() {
+    if (!realLphId || activeLph == null) return
+    setRpApplying(true); setRpError(null); setRpSavedMsg(null)
+    try {
+      const def = await getDefaultGroupForLph(activeLph)
+      if (!def.success) { setRpError(def.message || 'Default konnte nicht geladen werden'); return }
+      const defMap = new Map(def.data.map(d => [d.role_id, d.share_pct]))
+      // Jede aktive Rolle bekommt ihren Default-Anteil (fehlt einer -> 0).
+      const shares = planRoles.map(r => ({ roleId: r.id, sharePct: defMap.get(r.id) ?? 0 }))
+      const res = await saveLphRolePlan(realLphId, rpAreaId || null, shares)
+      if (!res.success) { setRpError(res.message || 'Speichern fehlgeschlagen'); return }
+      const m: Record<string, string> = {}
+      for (const s of res.data) m[s.role_id] = String(s.share_pct)
+      setRpShares(m)
+      setRpSavedMsg('Default angewendet')
+      // Projekt-Rollenverteilungen neu laden -> LPH-Balken-SOLL aktualisiert sich.
+      if (selectedProject) {
+        try {
+          const rp = await loadProjectRolePlans(selectedProject.id)
+          if (rp.success) setRolePlans(rp.data)
+        } catch { /* Balken-SOLL bleibt bis Reload auf altem Stand */ }
+      }
+    } catch (e) {
+      setRpError(e instanceof Error ? e.message : 'Default konnte nicht angewendet werden')
+    } finally {
+      setRpApplying(false)
     }
   }
 
@@ -814,11 +850,18 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
               )}
               {rpError && <p className="text-[11px] text-red-500">{rpError}</p>}
 
-              <div className="flex items-center gap-2">
-                <button onClick={handleSaveRolePlan} disabled={rpSaving || planRoles.length === 0}
+              <div className="flex items-center gap-2 flex-wrap">
+                <button onClick={handleSaveRolePlan} disabled={rpSaving || rpApplying || planRoles.length === 0}
                   className="px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 disabled:opacity-50">
                   {rpSaving ? 'Speichern…' : 'Speichern'}
                 </button>
+                {activeLph != null && groupKeyForLph(activeLph) && (
+                  <button onClick={handleApplyDefault} disabled={rpSaving || rpApplying || planRoles.length === 0}
+                    title={`Default-Vorlage „${ROLE_PLAN_DEFAULT_GROUP_LABELS[groupKeyForLph(activeLph)!]}" übernehmen`}
+                    className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 text-xs font-medium hover:bg-slate-50 hover:border-slate-300 disabled:opacity-50">
+                    {rpApplying ? 'Anwenden…' : 'Default anwenden'}
+                  </button>
+                )}
                 {rpSavedMsg && <span className="text-[11px] text-emerald-600">{rpSavedMsg}</span>}
               </div>
 

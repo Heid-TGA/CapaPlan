@@ -11,10 +11,12 @@ import {
   Pencil,
   FileJson,
   SlidersHorizontal,
+  ListChecks,
 } from 'lucide-react'
 import DataImport from './DataImport'
 import PlanningRolesModal from './PlanningRolesModal'
 import ManualProjectModal from './ManualProjectModal'
+import RolePlanDefaultsModal from './RolePlanDefaultsModal'
 
 interface DashboardHeaderProps {
   userName: string
@@ -37,6 +39,7 @@ export default function DashboardHeader({ userName, userRole }: DashboardHeaderP
   const router = useRouter()
   const [activeImport, setActiveImport] = useState<ImportType>(null)
   const [showRoles, setShowRoles] = useState(false)
+  const [showDefaults, setShowDefaults] = useState(false)
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null)
   const [showManual, setShowManual] = useState(false)
 
@@ -146,6 +149,16 @@ export default function DashboardHeader({ userName, userRole }: DashboardHeaderP
                       <SlidersHorizontal className="h-3.5 w-3.5 text-slate-400" />
                       Mitarbeiterrollen
                     </button>
+                    <button
+                      onClick={() => {
+                        closeMenu()
+                        setShowDefaults(true)
+                      }}
+                      className="w-full flex items-center gap-2.5 px-3.5 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+                    >
+                      <ListChecks className="h-3.5 w-3.5 text-slate-400" />
+                      Default-Rollenverteilung
+                    </button>
                   </div>
                 )}
               </div>
@@ -179,6 +192,11 @@ export default function DashboardHeader({ userName, userRole }: DashboardHeaderP
       {/* Planungsrollen-Verwaltung (UI: „Mitarbeiterrollen") */}
       {showRoles && (
         <PlanningRolesModal onClose={() => setShowRoles(false)} />
+      )}
+
+      {/* Default-Rollenverteilung (Paket 7C) */}
+      {showDefaults && (
+        <RolePlanDefaultsModal onClose={() => setShowDefaults(false)} />
       )}
 
       {/* Manuelle Projektanlage (Paket 7B) */}
