@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import {
   UploadCloud,
   Users,
@@ -10,10 +11,10 @@ import {
   Pencil,
   FileJson,
   SlidersHorizontal,
-  X,
 } from 'lucide-react'
 import DataImport from './DataImport'
 import PlanningRolesModal from './PlanningRolesModal'
+import ManualProjectModal from './ManualProjectModal'
 
 interface DashboardHeaderProps {
   userName: string
@@ -33,10 +34,11 @@ const btnSecondary = `
 `
 
 export default function DashboardHeader({ userName, userRole }: DashboardHeaderProps) {
+  const router = useRouter()
   const [activeImport, setActiveImport] = useState<ImportType>(null)
   const [showRoles, setShowRoles] = useState(false)
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null)
-  const [showManualPlaceholder, setShowManualPlaceholder] = useState(false)
+  const [showManual, setShowManual] = useState(false)
 
   const today = new Date().toLocaleDateString('de-DE', {
     weekday: 'long',
@@ -75,7 +77,7 @@ export default function DashboardHeader({ userName, userRole }: DashboardHeaderP
                     <button
                       onClick={() => {
                         closeMenu()
-                        setShowManualPlaceholder(true)
+                        setShowManual(true)
                       }}
                       className="w-full flex items-center gap-2.5 px-3.5 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
                     >
@@ -179,35 +181,12 @@ export default function DashboardHeader({ userName, userRole }: DashboardHeaderP
         <PlanningRolesModal onClose={() => setShowRoles(false)} />
       )}
 
-      {/* Platzhalter: manuelle Projektanlage (kommt in Paket 7B) */}
-      {showManualPlaceholder && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/30 backdrop-blur-sm">
-          <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-              <h2 className="text-base font-semibold text-slate-800">Projekt manuell anlegen</h2>
-              <button
-                onClick={() => setShowManualPlaceholder(false)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="p-6">
-              <p className="text-sm text-slate-500">
-                Die manuelle Projektanlage wird in einem Folgepaket (7B) bereitgestellt.
-                Bitte nutze bis dahin den <span className="font-medium text-slate-700">Abacus-Import</span>.
-              </p>
-            </div>
-            <div className="px-6 pb-5">
-              <button
-                onClick={() => setShowManualPlaceholder(false)}
-                className="w-full py-2.5 rounded-lg text-sm font-medium text-slate-500 border border-slate-200 hover:bg-slate-50 transition-colors"
-              >
-                Schließen
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* Manuelle Projektanlage (Paket 7B) */}
+      {showManual && (
+        <ManualProjectModal
+          onClose={() => setShowManual(false)}
+          onCreated={() => router.refresh()}
+        />
       )}
     </>
   )
