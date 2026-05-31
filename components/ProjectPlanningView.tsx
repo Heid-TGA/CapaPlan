@@ -8,7 +8,7 @@ import { loadTerminplan, saveLphSchedule, saveMilestone, ensureLphBudgetRow, typ
 import { loadExternalTrades, createExternalTrade, deleteExternalTrade, type ExternalTrade } from '@/app/actions/external-trades'
 import { loadPlanningRoles, type PlanningRole } from '@/app/actions/planning-roles'
 import { loadLphRolePlan, saveLphRolePlan, loadProjectRolePlans, type LphRoleShare } from '@/app/actions/lph-role-plan'
-import { loadProjectBudgetAreas, type BudgetArea } from '@/app/actions/budget-areas'
+import { loadProjectBudgetAreas, ensureDefaultBudgetAreas, type BudgetArea } from '@/app/actions/budget-areas'
 import { getDefaultGroupForLph, loadRolePlanDefaults, type RolePlanDefault } from '@/app/actions/role-plan-defaults'
 import { groupKeyForLph, ROLE_PLAN_DEFAULT_GROUP_LABELS } from '@/lib/role-plan-defaults'
 import { ALL_LPH, LPH_LABELS } from '@/lib/planning-phases'
@@ -100,9 +100,14 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const [selectedProject, setSelectedProject] = useState<Project | null>(
     projects.find(p => p.id === initialProjectId) ?? projects[0] ?? null
   )
-  const [selectedLph, setSelectedLph] = useState<number | null>(null)
-  const [visibleLph, setVisibleLph] = useState<Set<number>>(new Set())
-  const [showLphPicker, setShowLphPicker] = useState(false)
+  // 10.3: Aktive Auswahl per lph_id (UUID) statt LPH-Nummer — eine LPH-Nummer
+  // kann jetzt in mehreren Bereichen (HLKS/Elektro) existieren.
+  const [selectedLphId, setSelectedLphId] = useState<string | null>(null)
+  // 10.3: Aufgeklappte Gewerk-Gruppen im Terminplan (unabhängig schaltbar).
+  const [openGewerk, setOpenGewerk] = useState<Set<string>>(new Set(['HLKS', 'Elektro']))
+  const [showLegacy, setShowLegacy] = useState(true) // Alt-/bereichslose LPH-Gruppe
+  const [addMenuGewerk, setAddMenuGewerk] = useState<string | null>(null) // offenes „+ LPH"-Menü
+  const [seedingAreas, setSeedingAreas] = useState(false)
   // 8E: Budgetstatus je LPH-Zeile bereichsstabil über die echte lph_id (UUID)
   // geschlüsselt — sonst überschreibt ELT LPH 5 den Status von HLKS LPH 5.
   const [lphBudgets, setLphBudgets] = useState<Record<string, LphBudget>>({})
@@ -119,10 +124,11 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const [showMsForm, setShowMsForm] = useState(false)
   const [msDesc, setMsDesc] = useState('')
   const [msDate, setMsDate] = useState('') // ISO-Datum (yyyy-mm-dd) aus <input type="date">
-  const [msLph, setMsLph] = useState<number | null>(null)
+  const [msLphId, setMsLphId] = useState<string | null>(null)
   const [msSaving, setMsSaving] = useState(false)
   const [msError, setMsError] = useState<string | null>(null)
-  const [addingLph, setAddingLph] = useState<number | null>(null) // LPH ohne Budget wird gerade angelegt
+  // 10.3: gerade angelegte LPH (Schlüssel `${areaId}:${lphNumber}` — bereichsspezifisch).
+  const [addingLphKey, setAddingLphKey] = useState<string | null>(null)
 
   // Andere Gewerke (Terminplan-/Koordinationslayer, KEIN Ressourcenlayer)
   const [externalTrades, setExternalTrades] = useState<ExternalTrade[]>([])
@@ -167,7 +173,8 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // von Mitarbeitenden. Nutzt die echte lph_id (UUID) der aktiven LPH-Zeile.
   // 7D: Rollenverteilung klappt direkt unter der jeweiligen LPH-Zeile auf.
   // Nur eine LPH gleichzeitig; immer an die aktive LPH gekoppelt.
-  const [expandedLph, setExpandedLph] = useState<number | null>(null)
+  // 10.3: aufgeklapptes Rollenpanel per lph_id (bereichsstabil).
+  const [expandedLphId, setExpandedLphId] = useState<string | null>(null)
   const [planRoles, setPlanRoles] = useState<PlanningRole[]>([])
   const [planAreas, setPlanAreas] = useState<BudgetArea[]>([])
   // Alle Rollenverteilungen des Projekts (für SOLL-Stunden je LPH-Balken, 6B-2D).
@@ -175,7 +182,8 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // 7C Fix A: globale Default-Rollenverteilungen (Fallback für SOLL, wenn eine
   // LPH noch keine eigene Verteilung hat). Reine Vorlagen, keine allocations.
   const [rolePlanDefaults, setRolePlanDefaults] = useState<RolePlanDefault[]>([])
-  const [rpAreaId, setRpAreaId] = useState<string>('') // '' = Gesamt / ohne Bereich
+  // 10.3: Bereichs-Dropdown entfernt — die Rollenverteilung hängt an der konkreten
+  // (bereits bereichsbehafteten) LPH-Zeile; gespeichert wird stets mit area_id=null.
   const [rpShares, setRpShares] = useState<Record<string, string>>({}) // roleId -> %-String
   const [rpLoading, setRpLoading] = useState(false)
   const [rpSaving, setRpSaving] = useState(false)
@@ -249,13 +257,12 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       setMilestones(term.milestones)
       setRolePlans(rolePlansRes.success ? rolePlansRes.data : [])
 
-      // Default sichtbare LPH: terminierte ∪ mit Stunden; sonst alle budgetierten.
-      const scheduled = term.schedules.filter(s => s.start_kw != null && s.end_kw != null).map(s => s.lph_number)
-      const def = new Set<number>([...scheduled, ...alloc.lphWithHours])
-      const visible = def.size > 0 ? def : new Set<number>(term.schedules.map(s => s.lph_number))
-      setVisibleLph(visible)
-      const sortedVisible = [...visible].sort((a, b) => a - b)
-      setSelectedLph(sortedVisible[0] ?? null)
+      // 10.3: Default-Auswahl per lph_id. Bevorzugt eine terminierte Zeile, sonst
+      // die erste vorhandene LPH-Zeile (egal welcher Bereich). Sichtbarkeit wird
+      // jetzt über die aufklappbaren Gewerk-Gruppen gesteuert, nicht mehr per Set.
+      const sortedSchedules = [...term.schedules].sort((a, b) => a.lph_number - b.lph_number)
+      const firstScheduled = sortedSchedules.find(s => s.start_kw != null && s.end_kw != null)
+      setSelectedLphId((firstScheduled ?? sortedSchedules[0])?.lph_id ?? null)
     } catch (e) { console.error(e) }
 
     // Andere Gewerke separat laden — ein Fehler hier darf die Projektplanung
@@ -285,7 +292,8 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   async function handleProjectSelect(project: Project) {
     setSelectedProject(project)
     setLphBudgets({}); setAllocations({}); setSchedules([]); setMilestones([]); setRolePlans([])
-    setVisibleLph(new Set()); setSelectedLph(null); setShowLphPicker(false)
+    setSelectedLphId(null); setExpandedLphId(null); setAddMenuGewerk(null)
+    setOpenGewerk(new Set(['HLKS', 'Elektro'])); setShowLegacy(true)
     setExternalTrades([]); setShowEtForm(false); setEtError(null)
     setScheduleError(null)
     // 10.1: Budgetquelle/AG-Budgets zuruecksetzen (werden in loadAll neu geladen).
@@ -328,33 +336,88 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
   // ── Abgeleitete Werte ────────────────────────────────────────────────────────
 
-  // 9-KorrA: Bereichsumschalter (Gesamt/HLKS/ELT) entfernt. Die Projektplanung
-  // läuft wieder bereichslos über die Standard-/Abacus-Zeilen (area_id = null).
-  // area_id bleibt in der DB erhalten; künftige Struktur kommt über Anlagengruppen.
-  const effectiveAreaId: string | null = null
-  const areaSchedules = schedules.filter(s => (s.area_id ?? null) === effectiveAreaId)
+  // 10.3: Terminplan nach Gewerken gruppiert (HLKS = AG 1–3, Elektro = AG 4–5).
+  // Bereichsnamen robust mappen — UI-Label bleibt fest.
+  //   HLKS-Gruppe akzeptiert Bereichsnamen 'HLKS' und (alt) 'HLS'
+  //   Elektro-Gruppe akzeptiert Bereichsnamen 'Elektro' und (alt) 'ELT'
+  const hlksArea = planAreas.find(a => a.name === 'HLKS' || a.name === 'HLS') ?? null
+  const elektroArea = planAreas.find(a => a.name === 'Elektro' || a.name === 'ELT') ?? null
+  const gewerkGroups: { key: string; label: string; areaId: string | null }[] = [
+    { key: 'HLKS', label: 'HLKS (AG 1–3)', areaId: hlksArea?.id ?? null },
+    { key: 'Elektro', label: 'Elektro (AG 4–5)', areaId: elektroArea?.id ?? null },
+  ]
+  const hasAllGewerkAreas = hlksArea != null && elektroArea != null
 
-  // Verfügbare (budgetierte) LPH dieses Bereichs = solche mit project_lph_budgets-Zeile.
-  const availableLph = new Set(areaSchedules.map(s => s.lph_number))
-  const visibleSorted = areaSchedules
-    .filter(s => visibleLph.has(s.lph_number))
-    .sort((a, b) => a.lph_number - b.lph_number)
+  // LPH-Zeilen eines Bereichs (sortiert nach LPH-Nummer). area_id === null =
+  // alte/importierte bereichslose Zeilen (Aufgabe 5: nicht unter HLKS/Elektro mischen).
+  function schedulesForArea(areaId: string | null): LphSchedule[] {
+    return schedules.filter(s => (s.area_id ?? null) === areaId).sort((a, b) => a.lph_number - b.lph_number)
+  }
+  const legacySchedules = schedulesForArea(null)
 
-  // Effektiv aktive LPH (fällt auf erste sichtbare zurück, falls Auswahl im
-  // aktuellen Bereich nicht existiert oder ausgeblendet ist).
-  const activeLph = (selectedLph != null && visibleLph.has(selectedLph) && availableLph.has(selectedLph))
-    ? selectedLph
-    : (visibleSorted[0]?.lph_number ?? null)
-  const activeSchedule = activeLph != null ? areaSchedules.find(s => s.lph_number === activeLph) ?? null : null
-  // Echte LPH-UUID (aus project_lph_budgets) — Pflicht fuer lph_role_plan, Gantt,
-  // Meilensteine, Budgetstatus und Matrix-Carrier. Trägt implizit den Bereich.
+  // Gewerk-Label einer LPH-Zeile (für Meilenstein-Auswahl / Anzeige).
+  function gewerkLabelForSchedule(s: LphSchedule): string {
+    if (hlksArea && s.area_id === hlksArea.id) return 'HLKS'
+    if (elektroArea && s.area_id === elektroArea.id) return 'Elektro'
+    return 'ohne Bereich'
+  }
+
+  // 10.3: Aktive Auswahl strikt über lph_id (UUID). Trägt implizit den Bereich.
+  // activeLph (Nummer) bleibt für Labels/Default-Gruppen/Matrix erhalten.
+  const activeSchedule = selectedLphId != null ? schedules.find(s => s.lph_id === selectedLphId) ?? null : null
   const realLphId = activeSchedule?.lph_id ?? null
+  const activeLph = activeSchedule?.lph_number ?? null
+
+  // Alle LPH-Zeilen für die Meilenstein-Auswahl (Gewerk-sortiert, dann LPH).
+  const milestoneSchedules = [...schedules].sort((a, b) =>
+    gewerkLabelForSchedule(a).localeCompare(gewerkLabelForSchedule(b)) || a.lph_number - b.lph_number
+  )
+
+  function toggleGewerk(key: string) {
+    setOpenGewerk(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n })
+  }
+
+  // Standardbereiche (HLKS/ELT/Sonstige) anlegen, wenn HLKS/Elektro fehlen.
+  async function handleSeedAreas() {
+    if (!selectedProject || seedingAreas) return
+    setSeedingAreas(true)
+    try {
+      const res = await ensureDefaultBudgetAreas(selectedProject.id)
+      if (res.success) setPlanAreas(res.data)
+      else console.error('ensureDefaultBudgetAreas:', res.message)
+    } catch (e) { console.error(e) } finally { setSeedingAreas(false) }
+  }
+
+  // LPH bereichsspezifisch anlegen (Aufgabe 3): immer mit der area_id des Gewerks,
+  // niemals area_id = null. Idempotent über ensureLphBudgetRow.
+  async function addLphToArea(areaId: string, n: number) {
+    if (!selectedProject || addingLphKey) return
+    setAddMenuGewerk(null)
+    setAddingLphKey(`${areaId}:${n}`)
+    try {
+      const res = await ensureLphBudgetRow(selectedProject.id, n, areaId)
+      if (!res.success || !res.row) { console.error('ensureLphBudgetRow:', res.message); return }
+      const row = res.row
+      setSchedules(prev => prev.some(s => s.lph_id === row.lph_id)
+        ? prev.map(s => (s.lph_id === row.lph_id ? row : s))
+        : [...prev, row])
+      setSelectedLphId(row.lph_id)
+      try {
+        const b = await getLphBudgetStatusById(row.lph_id)
+        if (b) setLphBudgets(prev => ({ ...prev, [row.lph_id]: b }))
+      } catch { /* 0-Euro-LPH: Budgetkarte greift auf totalBudget>0-Guard zurück */ }
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setAddingLphKey(null)
+    }
+  }
 
   // ── Rollenverteilung (6B-2B) ────────────────────────────────────────────────
   // Aktive Planungsrollen + Budgetbereiche je Projekt laden.
   useEffect(() => {
     const pid = selectedProject?.id
-    setRpAreaId(''); setRpSavedMsg(null); setRpError(null)
+    setRpSavedMsg(null); setRpError(null)
     if (!pid) { setPlanRoles([]); setPlanAreas([]); return }
     let cancelled = false
     Promise.all([loadPlanningRoles(), loadProjectBudgetAreas(pid)])
@@ -376,13 +439,14 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     return () => { cancelled = true }
   }, [])
 
-  // Vorhandene Verteilung der aktiven LPH (+ Bereich) laden.
+  // Vorhandene Verteilung der aktiven LPH-Zeile laden (immer area_id=null —
+  // die Zeile selbst trägt bereits den Bereich, kein zweiter Bereichsfilter).
   useEffect(() => {
     setRpSavedMsg(null)
     if (!realLphId) { setRpShares({}); return }
     let cancelled = false
     setRpLoading(true)
-    loadLphRolePlan(realLphId, rpAreaId || null)
+    loadLphRolePlan(realLphId, null)
       .then(res => {
         if (cancelled) return
         const m: Record<string, string> = {}
@@ -392,14 +456,14 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       .catch(() => { if (!cancelled) setRpShares({}) })
       .finally(() => { if (!cancelled) setRpLoading(false) })
     return () => { cancelled = true }
-  }, [realLphId, rpAreaId])
+  }, [realLphId])
 
   async function handleSaveRolePlan() {
     if (!realLphId) return
     setRpSaving(true); setRpError(null); setRpSavedMsg(null)
     try {
       const shares = planRoles.map(r => ({ roleId: r.id, sharePct: parseSharePct(rpShares[r.id]) }))
-      const res = await saveLphRolePlan(realLphId, rpAreaId || null, shares)
+      const res = await saveLphRolePlan(realLphId, null, shares)
       if (!res.success) { setRpError(res.message || 'Speichern fehlgeschlagen'); return }
       const m: Record<string, string> = {}
       for (const s of res.data) m[s.role_id] = String(s.share_pct)
@@ -432,7 +496,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       const defMap = new Map(def.data.map(d => [d.role_id, d.share_pct]))
       // Jede aktive Rolle bekommt ihren Default-Anteil (fehlt einer -> 0).
       const shares = planRoles.map(r => ({ roleId: r.id, sharePct: defMap.get(r.id) ?? 0 }))
-      const res = await saveLphRolePlan(realLphId, rpAreaId || null, shares)
+      const res = await saveLphRolePlan(realLphId, null, shares)
       if (!res.success) { setRpError(res.message || 'Speichern fehlgeschlagen'); return }
       const m: Record<string, string> = {}
       for (const s of res.data) m[s.role_id] = String(s.share_pct)
@@ -454,49 +518,6 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
 
   const rpSum = planRoles.reduce((a, r) => a + parseSharePct(rpShares[r.id]), 0)
   const rpSumRounded = Math.round(rpSum * 10) / 10
-
-  async function toggleLph(n: number) {
-    // 8E: zuerst BEREICHSBEZOGEN prüfen, ob die LPH-Zeile im aktuellen Bereich
-    // existiert (availableLph ist bereichsgefiltert). So meint "LPH 5 anzeigen"
-    // auf dem ELT-Tab niemals die HLKS-Zeile.
-    if (availableLph.has(n)) {
-      // Nur clientseitig ein-/ausblenden — KEINE DB-Zeile / Allocations /
-      // Meilensteine / Terminbalken löschen.
-      if (visibleLph.has(n)) {
-        setVisibleLph(prev => { const next = new Set(prev); next.delete(n); return next })
-      } else {
-        setVisibleLph(prev => new Set(prev).add(n))
-        setSelectedLph(n)
-      }
-      return
-    }
-    // LPH ohne Budget: idempotent eine 0-Euro-Zeile anlegen, dann einblenden.
-    // 9-KorrA: bereichslos (effectiveAreaId = null) — kein Bereichsumschalter mehr.
-    if (!selectedProject || addingLph != null) return
-    setAddingLph(n)
-    try {
-      const res = await ensureLphBudgetRow(selectedProject.id, n, effectiveAreaId)
-      if (!res.success || !res.row) { console.error('ensureLphBudgetRow:', res.message); return }
-      const row = res.row
-      // Upsert in den lokalen State über (lph_number UND area_id) — niemals eine
-      // gleichnamige LPH eines anderen Bereichs überschreiben.
-      setSchedules(prev => prev.some(s => s.lph_number === row.lph_number && (s.area_id ?? null) === (row.area_id ?? null))
-        ? prev.map(s => (s.lph_number === row.lph_number && (s.area_id ?? null) === (row.area_id ?? null) ? row : s))
-        : [...prev, row])
-      setVisibleLph(prev => new Set(prev).add(n))
-      setSelectedLph(n)
-      // Budgetstatus nachladen (für „Verplante Stunden" / spätere Allocations) —
-      // eindeutig über die neue lph_id der gerade sichergestellten Zeile (Paket 8D).
-      try {
-        const b = await getLphBudgetStatusById(row.lph_id)
-        if (b) setLphBudgets(prev => ({ ...prev, [row.lph_id]: b }))
-      } catch { /* 0-Euro-LPH oder Patch 8C noch nicht ausgeführt: Budgetkarte greift auf totalBudget>0-Guard zurück */ }
-    } catch (e) {
-      console.error(e)
-    } finally {
-      setAddingLph(null)
-    }
-  }
 
   // ── Terminplan-/Range-Helpers (auf aktive LPH bezogen) ─────────────────────────
 
@@ -525,17 +546,19 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // ── Meilenstein-MVP ──────────────────────────────────────────────────────────
 
   function openMsForm() {
-    // Nur LPH-Zeilen des aktiven Bereichs — Meilenstein hängt an genau dieser lph_id.
-    const sorted = [...areaSchedules].sort((a, b) => a.lph_number - b.lph_number)
+    // 10.3: Meilenstein hängt an genau einer lph_id (bereichsbehaftet). Auswahl
+    // aus ALLEN vorhandenen LPH-Zeilen (Gewerk-Label macht die Zeile eindeutig).
     setMsDesc('')
     setMsDate('')
-    setMsLph(activeLph != null && availableLph.has(activeLph) ? activeLph : (sorted[0]?.lph_number ?? null))
+    setMsLphId(realLphId && milestoneSchedules.some(s => s.lph_id === realLphId)
+      ? realLphId
+      : (milestoneSchedules[0]?.lph_id ?? null))
     setMsError(null)
     setShowMsForm(true)
   }
 
   async function handleSaveMilestone() {
-    if (!selectedProject || msLph == null) return
+    if (!selectedProject || msLphId == null) return
     const desc = msDesc.trim()
     if (!desc) { setMsError('Beschreibung fehlt'); return }
     if (!msDate) { setMsError('Datum fehlt'); return }
@@ -544,8 +567,8 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     const parsed = new Date(`${msDate}T00:00:00Z`)
     if (Number.isNaN(parsed.getTime())) { setMsError('Datum ungültig'); return }
     const { year, week: kw } = isoWeekOf(parsed) // ISO-Jahr, NICHT getFullYear()
-    const sched = areaSchedules.find(s => s.lph_number === msLph)
-    if (!sched) { setMsError('LPH ohne Budget'); return }   // nur LPH mit vorhandener lph_id (im aktiven Bereich)
+    const sched = schedules.find(s => s.lph_id === msLphId)
+    if (!sched) { setMsError('LPH ohne Budget'); return }   // nur LPH mit vorhandener lph_id
     setMsSaving(true); setMsError(null)
     try {
       // msDate (ISO yyyy-mm-dd) wird zusätzlich als exaktes Datum gespeichert;
@@ -953,11 +976,12 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   // geladenen Matrix-Allocations → IST bezieht sich auf das sichtbare Fenster.
   // Keine aktive LPH in einer KW → die Stunden dieser KW werden keiner LPH
   // zugeordnet (übersprungen). Summen-erhaltend: Σ Anteile = Wochenstunden.
-  // 8E: per lph_id geschlüsselt. „active" sind die sichtbaren Balken des aktiven
-  // Bereichs (visibleSorted ist bereits bereichsgefiltert).
+  // 8E/10.3: per lph_id geschlüsselt. „active" = alle terminierten LPH-Balken
+  // (über ALLE Bereiche/Gewerke) deren Zeitraum diese KW abdeckt. Die KW-Stunden
+  // werden gleichmäßig auf diese Balken verteilt (projektbezogenes Übergangsmodell).
   const istByLph: Record<string, number> = {}
   for (const w of windowWeeks) {
-    const active = visibleSorted.filter(s =>
+    const active = schedules.filter(s =>
       s.start_kw != null && s.end_kw != null &&
       (s.plan_year == null || s.plan_year === w.year) &&
       w.week >= s.start_kw && w.week <= s.end_kw
@@ -1065,16 +1089,6 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                     Σ {rpSumRounded} %
                   </span>
                 )}
-              </div>
-
-              {/* Bereich */}
-              <div className="flex items-center gap-2">
-                <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Bereich</label>
-                <select value={rpAreaId} onChange={e => { setRpAreaId(e.target.value); setRpSavedMsg(null) }}
-                  className="text-sm border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-700 outline-none focus:border-slate-400">
-                  <option value="">Gesamt / ohne Bereich</option>
-                  {planAreas.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                </select>
               </div>
 
               {/* Rollen */}
@@ -1197,6 +1211,88 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
           </div>
         )}
       </div>
+    )
+  }
+
+  // 10.3: Eine LPH-Zeile (Gantt + Meilenstein-Marker) + aufklappbares Rollenpanel.
+  // Wird unter HLKS/Elektro UND unter der Alt-Gruppe verwendet. Alles strikt über
+  // s.lph_id: Auswahl, Gantt-Speichern, Meilenstein-Marker, Rollenverteilung.
+  function renderLphRow(s: LphSchedule) {
+    const isSel = realLphId === s.lph_id
+    const isExpanded = expandedLphId === s.lph_id
+    const color = lphColor(s.lph_number)
+    const barHasBudget = (lphBudgets[s.lph_id]?.budget_eur ?? s.budget_eur ?? 0) > 0
+    const barIst = istByLph[s.lph_id] ?? 0
+    const barSoll = sollByLph[s.lph_id] ?? 0
+    return (
+      <Fragment key={s.lph_id}>
+        <div
+          className={`flex items-center border-b border-slate-100 cursor-pointer ${isSel ? 'bg-slate-50' : ''}`}
+          onClick={() => { setSelectedLphId(s.lph_id); setExpandedLphId(cur => cur === s.lph_id ? cur : null) }}>
+          <div style={{ width: EMP_COL, minWidth: EMP_COL }} className="pl-9 pr-5 py-1.5 flex items-center gap-2 border-r border-slate-100">
+            {/* 7D: Chevron klappt die Rollenverteilung dieser LPH auf/zu. */}
+            <button
+              onClick={(e) => { e.stopPropagation(); setSelectedLphId(s.lph_id); setExpandedLphId(cur => cur === s.lph_id ? null : s.lph_id) }}
+              title="Rollenverteilung"
+              className="shrink-0 -ml-1 p-0.5 rounded hover:bg-slate-200/70 transition-colors">
+              <ChevronRight className={`h-3.5 w-3.5 text-slate-400 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+            </button>
+            <div className={`h-2 w-2 rounded-full shrink-0 ${color}`} />
+            <p className="text-xs font-semibold text-slate-700 shrink-0">LPH {s.lph_number}</p>
+            <p className="text-[10px] text-slate-400 truncate">{LPH_LABELS[s.lph_number]}</p>
+          </div>
+          <div style={{ width: CAP_COL, minWidth: CAP_COL }} className="border-r border-slate-100" />
+          {/* minHeight 28: gibt dem absolut positionierten GanttBar wieder eine Box. */}
+          <div className="flex-1 relative" style={{ minHeight: 28 }}>
+            <div className="absolute inset-0 flex pointer-events-none">
+              {windowWeeks.map((w, i) => (
+                <div key={i} style={{ width: COL_WIDTH, minWidth: COL_WIDTH }}
+                  className={hiKeys.has(weekKey(w)) ? 'bg-blue-50/40' : ''} />
+              ))}
+            </div>
+            <GanttBar
+              lphId={s.lph_id}
+              lphNumber={s.lph_number}
+              weeks={windowWeeks}
+              planYear={s.plan_year}
+              colWidth={COL_WIDTH}
+              startKw={s.start_kw}
+              endKw={s.end_kw}
+              color={color}
+              istHours={barIst}
+              sollHours={barSoll}
+              hasSollBudget={barHasBudget}
+              tooltip={barTooltip(s.lph_number, barIst, barSoll, barHasBudget)}
+              onChange={(id, start, end, planYear) => {
+                setSchedules(prev => prev.map(sc =>
+                  sc.lph_id === id ? { ...sc, start_kw: start, end_kw: end, plan_year: planYear } : sc
+                ))
+                setSelectedLphId(s.lph_id)
+              }}
+              onSave={(id, start, end, planYear) => persistSchedule(id, start, end, planYear)}
+            />
+            {/* Meilenstein-Marker dieser LPH-Zeile (jahreswechsel-sicher). */}
+            <div className="absolute inset-0 pointer-events-none">
+              {milestones.filter(m => m.lph_id === s.lph_id).map(m => {
+                const idx = windowWeeks.findIndex(w => w.week === m.kw && w.year === m.year)
+                if (idx < 0) return null
+                return (
+                  <div key={m.id} style={{ left: idx * COL_WIDTH, width: COL_WIDTH }}
+                    className="absolute top-0 bottom-0 flex items-center justify-center">
+                    <span title={msTooltip(m)} className="pointer-events-auto cursor-help">
+                      {m.type === 'external'
+                        ? <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-white ring-1 ring-red-200 shadow-sm"><X className="h-2.5 w-2.5 text-red-600" strokeWidth={3} /></span>
+                        : <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-white ring-1 ring-blue-200 shadow-sm"><Circle className="h-2 w-2 text-blue-500 fill-blue-500" /></span>}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+        {/* 7D: Rollenverteilung direkt unter der aufgeklappten LPH-Zeile. */}
+        {isExpanded && renderRolePanel()}
+      </Fragment>
     )
   }
 
@@ -1429,46 +1525,13 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
               <p className="text-xs text-slate-400">{activeLph != null ? `LPH ${activeLph}: ${LPH_LABELS[activeLph]}` : 'Keine LPH ausgewählt'}</p>
             </div>
 
-            {/* LPH hinzufügen */}
-            <div className="relative">
-              <button onClick={() => setShowLphPicker(v => !v)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 transition-colors">
-                <Plus className="h-3.5 w-3.5" />LPH hinzufügen
-              </button>
-              {showLphPicker && (
-                <>
-                  <div className="fixed inset-0 z-40" onClick={() => setShowLphPicker(false)} />
-                  <div className="absolute left-0 top-full mt-2 z-50 w-80 bg-white rounded-xl border border-slate-200 shadow-xl p-2">
-                    <p className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-400">
-                      Leistungsphasen anzeigen
-                    </p>
-                    {ALL_LPH.map(n => {
-                      const available = availableLph.has(n)
-                      // checked nur, wenn die Zeile im AKTUELLEN Bereich existiert und sichtbar ist.
-                      const checked = available && visibleLph.has(n)
-                      const busy = addingLph === n
-                      return (
-                        <label key={n}
-                          className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-sm ${busy ? 'cursor-wait opacity-60' : 'cursor-pointer hover:bg-slate-50'}`}>
-                          <input type="checkbox" disabled={busy} checked={checked} onChange={() => toggleLph(n)}
-                            className="h-3.5 w-3.5 rounded border-slate-300 accent-slate-800" />
-                          <span className="font-semibold text-slate-700 shrink-0">LPH {n}</span>
-                          <span className="text-xs text-slate-400 truncate">{LPH_LABELS[n]}</span>
-                          {busy
-                            ? <span className="ml-auto text-[9px] text-slate-400 shrink-0">anlegen…</span>
-                            : !available && <span className="ml-auto text-[9px] text-amber-500 shrink-0">kein Budget</span>}
-                        </label>
-                      )
-                    })}
-                  </div>
-                </>
-              )}
-            </div>
+            {/* 10.3: Globaler „LPH hinzufügen"-Picker entfernt — LPH werden jetzt
+                bereichsspezifisch je Gewerk-Gruppe (HLKS/Elektro) angelegt. */}
 
-            {/* Meilenstein hinzufügen */}
+            {/* Meilenstein hinzufügen — hängt an genau einer LPH-Zeile (lph_id). */}
             <div className="relative">
               <button onClick={() => (showMsForm ? setShowMsForm(false) : openMsForm())}
-                disabled={availableLph.size === 0}
+                disabled={schedules.length === 0}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 text-xs font-medium hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
                 <Plus className="h-3.5 w-3.5" />Meilenstein
               </button>
@@ -1477,7 +1540,7 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                   <div className="fixed inset-0 z-40" onClick={() => setShowMsForm(false)} />
                   <div className="absolute left-0 top-full mt-2 z-50 w-72 bg-white rounded-xl border border-slate-200 shadow-xl p-3">
                     <p className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-widest text-slate-400">Meilenstein hinzufügen</p>
-                    {availableLph.size === 0 ? (
+                    {schedules.length === 0 ? (
                       <p className="px-1 py-2 text-xs text-slate-400">Keine LPH mit Budget vorhanden.</p>
                     ) : (
                       <div className="space-y-2.5 px-1">
@@ -1494,10 +1557,10 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
                         </div>
                         <div>
                           <label className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">Leistungsphase</label>
-                          <select value={msLph ?? ''} onChange={e => setMsLph(Number(e.target.value))}
+                          <select value={msLphId ?? ''} onChange={e => setMsLphId(e.target.value || null)}
                             className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-slate-400 text-slate-800 bg-white">
-                            {[...areaSchedules].sort((a, b) => a.lph_number - b.lph_number).map(s => (
-                              <option key={s.lph_id} value={s.lph_number}>LPH {s.lph_number}: {LPH_LABELS[s.lph_number]}</option>
+                            {milestoneSchedules.map(s => (
+                              <option key={s.lph_id} value={s.lph_id}>{gewerkLabelForSchedule(s)} · LPH {s.lph_number}: {LPH_LABELS[s.lph_number]}</option>
                             ))}
                           </select>
                         </div>
@@ -1536,93 +1599,103 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
         <div className="overflow-x-auto" ref={scrollRef}>
           <div style={{ minWidth: `${EMP_COL + CAP_COL + windowWeeks.length * COL_WIDTH}px` }}>
 
-            {/* ── LPH-ZEILEN (1→9, nur sichtbare) ── */}
-            {visibleSorted.length === 0 ? (
-              <div className="px-5 py-6 text-center text-xs text-slate-400 border-b border-slate-100">
-                Noch keine Leistungsphase sichtbar — über „LPH hinzufügen" auswählen.
+            {/* ── 10.3: GEWERK-GRUPPEN (HLKS / Elektro) + Alt-Zeilen ── */}
+
+            {/* Standardbereiche-Hinweis, wenn HLKS/Elektro-Bereiche fehlen (Aufgabe 4). */}
+            {!hasAllGewerkAreas && (
+              <div className="flex items-center justify-between gap-3 px-5 py-2.5 bg-amber-50/60 border-b border-amber-100"
+                style={{ width: EMP_COL + CAP_COL + windowWeeks.length * COL_WIDTH }}>
+                <p className="text-[11px] text-amber-700">
+                  Für die Gewerk-Ansicht fehlen Standardbereiche
+                  {` (${[!hlksArea && 'HLKS', !elektroArea && 'Elektro'].filter(Boolean).join(' & ')})`}.
+                </p>
+                <button onClick={handleSeedAreas} disabled={seedingAreas}
+                  className="shrink-0 px-2.5 py-1 rounded-lg border border-amber-200 bg-white text-amber-700 text-[11px] font-medium hover:bg-amber-50 transition-colors disabled:opacity-50">
+                  {seedingAreas ? 'Anlegen…' : 'Standardbereiche anlegen'}
+                </button>
               </div>
-            ) : visibleSorted.map(s => {
-              const isSel = activeLph === s.lph_number
-              const isExpanded = isSel && expandedLph === s.lph_number
-              const color = lphColor(s.lph_number)
-              // 9-KorrA: wirksames Sollbudget = zentrales Abacus-/Projekt-LPH-Budget > 0.
-              const barHasBudget = (lphBudgets[s.lph_id]?.budget_eur ?? s.budget_eur ?? 0) > 0
-              const barIst = istByLph[s.lph_id] ?? 0
-              const barSoll = sollByLph[s.lph_id] ?? 0
+            )}
+
+            {/* HLKS- / Elektro-Gruppen (unabhängig auf-/zuklappbar). */}
+            {gewerkGroups.map(g => {
+              const open = openGewerk.has(g.key)
+              const rows = g.areaId ? schedulesForArea(g.areaId) : []
               return (
-                <Fragment key={s.lph_id}>
-                <div
-                  className={`flex items-center border-b border-slate-100 cursor-pointer ${isSel ? 'bg-slate-50' : ''}`}
-                  onClick={() => { setSelectedLph(s.lph_number); setExpandedLph(cur => cur === s.lph_number ? cur : null) }}>
-                  <div style={{ width: EMP_COL, minWidth: EMP_COL }} className="px-5 py-1.5 flex items-center gap-2 border-r border-slate-100">
-                    {/* 7D: Chevron klappt die Rollenverteilung dieser LPH auf/zu. */}
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setSelectedLph(s.lph_number); setExpandedLph(cur => cur === s.lph_number ? null : s.lph_number) }}
-                      title="Rollenverteilung"
-                      className="shrink-0 -ml-1 p-0.5 rounded hover:bg-slate-200/70 transition-colors">
-                      <ChevronRight className={`h-3.5 w-3.5 text-slate-400 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                <div key={g.key} className="border-b border-slate-100">
+                  <div className="flex items-center justify-between bg-slate-50/60 px-5 py-1.5"
+                    style={{ width: EMP_COL + CAP_COL + windowWeeks.length * COL_WIDTH }}>
+                    <button onClick={() => g.areaId && toggleGewerk(g.key)} disabled={!g.areaId}
+                      className="flex items-center gap-1.5 group disabled:cursor-default">
+                      <ChevronRight className={`h-3.5 w-3.5 text-slate-400 transition-transform ${open && g.areaId ? 'rotate-90' : ''}`} />
+                      <span className="text-xs font-semibold text-slate-600 group-hover:text-slate-800">{g.label}</span>
+                      {g.areaId
+                        ? <span className="text-[10px] text-slate-400 font-medium">{rows.length}</span>
+                        : <span className="text-[10px] text-amber-500 font-medium">Bereich fehlt</span>}
                     </button>
-                    <div className={`h-2 w-2 rounded-full shrink-0 ${color}`} />
-                    <p className="text-xs font-semibold text-slate-700 shrink-0">LPH {s.lph_number}</p>
-                    <p className="text-[10px] text-slate-400 truncate">{LPH_LABELS[s.lph_number]}</p>
+                    {/* Aufgabe 3 (Variante A): bereichsspezifisches „+ LPH" je Gewerk. */}
+                    {g.areaId && (
+                      <div className="relative">
+                        <button onClick={() => setAddMenuGewerk(cur => cur === g.key ? null : g.key)}
+                          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-slate-600 text-[11px] font-medium hover:bg-slate-50 transition-colors">
+                          <Plus className="h-3 w-3" />LPH
+                        </button>
+                        {addMenuGewerk === g.key && (
+                          <>
+                            <div className="fixed inset-0 z-40" onClick={() => setAddMenuGewerk(null)} />
+                            <div className="absolute right-0 top-full mt-2 z-50 w-72 bg-white rounded-xl border border-slate-200 shadow-xl p-2">
+                              <p className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-400">
+                                LPH zu {g.label} hinzufügen
+                              </p>
+                              {ALL_LPH.map(n => {
+                                const exists = rows.some(s => s.lph_number === n)
+                                const busy = addingLphKey === `${g.areaId}:${n}`
+                                return (
+                                  <button key={n} disabled={exists || busy} onClick={() => addLphToArea(g.areaId!, n)}
+                                    className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-sm text-left ${exists ? 'opacity-40 cursor-default' : busy ? 'cursor-wait opacity-60' : 'hover:bg-slate-50'}`}>
+                                    <span className="font-semibold text-slate-700 shrink-0">LPH {n}</span>
+                                    <span className="text-xs text-slate-400 truncate">{LPH_LABELS[n]}</span>
+                                    {exists ? <span className="ml-auto text-[9px] text-slate-400 shrink-0">vorhanden</span>
+                                      : busy ? <span className="ml-auto text-[9px] text-slate-400 shrink-0">anlegen…</span> : null}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <div style={{ width: CAP_COL, minWidth: CAP_COL }} className="border-r border-slate-100" />
-                  {/* minHeight 28: gibt dem absolut positionierten GanttBar wieder eine
-                      Box (sonst kollabiert flex-1 auf 0 → Balken unsichtbar). */}
-                  <div className="flex-1 relative" style={{ minHeight: 28 }}>
-                    <div className="absolute inset-0 flex pointer-events-none">
-                      {windowWeeks.map((w, i) => (
-                        <div key={i} style={{ width: COL_WIDTH, minWidth: COL_WIDTH }}
-                          className={hiKeys.has(weekKey(w)) ? 'bg-blue-50/40' : ''} />
-                      ))}
-                    </div>
-                    <GanttBar
-                      lphId={s.lph_id}
-                      lphNumber={s.lph_number}
-                      weeks={windowWeeks}
-                      planYear={s.plan_year}
-                      colWidth={COL_WIDTH}
-                      startKw={s.start_kw}
-                      endKw={s.end_kw}
-                      color={color}
-                      istHours={barIst}
-                      sollHours={barSoll}
-                      hasSollBudget={barHasBudget}
-                      tooltip={barTooltip(s.lph_number, barIst, barSoll, barHasBudget)}
-                      onChange={(id, start, end, planYear) => {
-                        setSchedules(prev => prev.map(sc =>
-                          sc.lph_id === id ? { ...sc, start_kw: start, end_kw: end, plan_year: planYear } : sc
-                        ))
-                        setSelectedLph(s.lph_number)
-                      }}
-                      onSave={(id, start, end, planYear) => persistSchedule(id, start, end, planYear)}
-                    />
-                    {/* Meilenstein-Marker dieser LPH-Zeile: rotes X an der jeweiligen KW,
-                        unabhängig vom Terminbalken (auch ohne Balken sichtbar). Jahres-
-                        wechsel-sicher: KW UND Jahr müssen zur Fensterspalte passen. */}
-                    <div className="absolute inset-0 pointer-events-none">
-                      {milestones.filter(m => m.lph_id === s.lph_id).map(m => {
-                        const idx = windowWeeks.findIndex(w => w.week === m.kw && w.year === m.year)
-                        if (idx < 0) return null
-                        return (
-                          <div key={m.id} style={{ left: idx * COL_WIDTH, width: COL_WIDTH }}
-                            className="absolute top-0 bottom-0 flex items-center justify-center">
-                            <span title={msTooltip(m)} className="pointer-events-auto cursor-help">
-                              {m.type === 'external'
-                                ? <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-white ring-1 ring-red-200 shadow-sm"><X className="h-2.5 w-2.5 text-red-600" strokeWidth={3} /></span>
-                                : <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-white ring-1 ring-blue-200 shadow-sm"><Circle className="h-2 w-2 text-blue-500 fill-blue-500" /></span>}
-                            </span>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
+                  {open && g.areaId && (
+                    rows.length === 0
+                      ? <div className="px-5 py-3 text-center text-[11px] text-slate-400">Noch keine LPH in diesem Gewerk — über „+ LPH" hinzufügen.</div>
+                      : rows.map(renderLphRow)
+                  )}
                 </div>
-                {/* 7D: Rollenverteilung direkt unter der aufgeklappten LPH-Zeile. */}
-                {isExpanded && renderRolePanel()}
-                </Fragment>
               )
             })}
+
+            {/* Aufgabe 5: Alt-/bereichslose LPH-Zeilen (area_id = null). Bleiben
+                technisch erhalten; NICHT migriert, NICHT unter HLKS/Elektro gemischt. */}
+            {legacySchedules.length > 0 && (
+              <div className="border-b border-slate-100">
+                <div className="flex items-center bg-slate-50/40 px-5 py-1.5"
+                  style={{ width: EMP_COL + CAP_COL + windowWeeks.length * COL_WIDTH }}>
+                  <button onClick={() => setShowLegacy(v => !v)} className="flex items-center gap-1.5 group">
+                    <ChevronRight className={`h-3.5 w-3.5 text-slate-400 transition-transform ${showLegacy ? 'rotate-90' : ''}`} />
+                    <span className="text-xs font-semibold text-slate-600 group-hover:text-slate-800">Ohne Gewerk-Zuordnung (Alt)</span>
+                    <span className="text-[10px] text-slate-400 font-medium">{legacySchedules.length}</span>
+                  </button>
+                </div>
+                {showLegacy && (
+                  <>
+                    <div className="px-5 py-1.5 bg-slate-50/30">
+                      <p className="text-[10px] text-slate-400">Importierte/ältere LPH-Zeilen ohne Bereich — werden nicht als HLKS/Elektro behandelt.</p>
+                    </div>
+                    {legacySchedules.map(renderLphRow)}
+                  </>
+                )}
+              </div>
+            )}
 
             {/* ── ANDERE GEWERKE (Terminplan-/Koordinationslayer, read-only) ── */}
             <div className="border-b border-slate-100">
