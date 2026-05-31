@@ -15,6 +15,18 @@ import { ALL_LPH, LPH_LABELS } from '@/lib/planning-phases'
 import { isoWeekOf, mondayOfIsoWeek, currentIsoWeek, addWeeks, buildWeekWindow, type WeekRef, type WindowWeek } from '@/lib/calendar-weeks'
 import GanttBar from './GanttBar'
 import HoaiCalculatorModal from './HoaiCalculatorModal'
+// 10.1: Projektweite Budgetquelle + AG-Budgets (persistent).
+import {
+  loadProjectBudgetSource, saveProjectBudgetSource,
+  loadProjectAgBudgets, saveProjectAgBudgets, deriveAgBudgetsFromHoaiScenario,
+  type AgBudget, type BudgetSourceType,
+} from '@/app/actions/project-budget-source'
+import { loadHoaiScenarios, type HoaiScenario } from '@/app/actions/hoai-scenarios'
+import { calcHoaiDummy } from '@/lib/hoai-dummy'
+import {
+  ANLAGENGRUPPEN, GEWERK_GROUPS, AG_NUMBERS, HLKS_AGS, ELEKTRO_AGS,
+  HOAI_DUMMY_AG_SPLIT_SUM,
+} from '@/lib/anlagengruppen'
 
 // ── Konstanten ─────────────────────────────────────────────────────────────────
 
@@ -70,20 +82,17 @@ function parseSharePct(raw: string | undefined): number {
   return Math.min(100, Math.max(0, n))
 }
 
-// 9-KorrA: Kostengruppen/Anlagengruppen (HOAI/DIN 276, TGA) — nur Labels für die
-// vorbereitete „Budget nach Anlagengruppen"-Karte. Noch KEINE Budgetdaten.
-const ANLAGENGRUPPEN: { ag: number; label: string }[] = [
-  { ag: 1, label: 'AG 1: Abwasser-, Wasser- und Gasanlagen' },
-  { ag: 2, label: 'AG 2: Wärmeversorgungsanlagen' },
-  { ag: 3, label: 'AG 3: Lufttechnische Anlagen' },
-  { ag: 4, label: 'AG 4: Starkstromanlagen' },
-  { ag: 5, label: 'AG 5: Fernmelde- und informationstechnische Anlagen' },
-]
-// Gewerk-Gruppierung für die „Sollstunden nach Gewerk"-Karte.
-const GEWERK_GRUPPEN: { name: string; span: string }[] = [
-  { name: 'HLKS', span: 'AG 1–3' },
-  { name: 'Elektro', span: 'AG 4–5' },
-]
+// 10.1: AG-Struktur (AG 1–5) + Gewerk-Gruppierung kommen jetzt zentral aus
+// lib/anlagengruppen.ts (geteilt mit den Server Actions).
+
+// Deutsche EUR-Eingabe -> number >= 0. Leer/ungueltig/negativ -> 0.
+function parseEurInput(raw: string | undefined): number {
+  if (!raw) return 0
+  const cleaned = raw.replace(/[€%\s]/g, '').replace(/\./g, '').replace(',', '.')
+  const n = Number(cleaned)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return n
+}
 
 // ── Haupt-Komponente ───────────────────────────────────────────────────────────
 
@@ -128,13 +137,29 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const [etError, setEtError] = useState<string | null>(null)
   const [deletingEtId, setDeletingEtId] = useState<string | null>(null)
 
-  // 9-KorrA: Budgetquelle auf PROJEKTebene (statt Budgetbasis pro LPH). Im MVP
-  // rein visuelle Auswahl: Abacus | HOAI-Rechner | Frei/manuell. calc_profile in
-  // DB/Actions bleibt unberührt (wird hier nicht mehr angezeigt/geschrieben).
-  const [budgetSource, setBudgetSource] = useState<'abacus' | 'hoai' | 'manual'>('abacus')
-  const [showManualPlaceholder, setShowManualPlaceholder] = useState(false)
+  // 10.1: Budgetquelle auf PROJEKTebene, jetzt PERSISTENT (project_budget_source).
+  // Abacus | HOAI-Rechner | Frei/manuell. Steuert die AG-Budgetlogik unten.
+  const [budgetSource, setBudgetSource] = useState<BudgetSourceType>('abacus')
+  const [hoaiScenarioId, setHoaiScenarioId] = useState<string | null>(null)
+  const [budgetSourceSaving, setBudgetSourceSaving] = useState(false)
+  const [budgetSourceError, setBudgetSourceError] = useState<string | null>(null)
 
-  // HOAI-Dummy-Rechner (A2) — rein lokales Szenario-Fenster, keine Persistenz.
+  // 10.1: AG-Budgets (AG 1–5) je Projekt (project_ag_budgets), per ag_number.
+  const [agBudgets, setAgBudgets] = useState<Record<number, AgBudget>>({})
+
+  // 10.1: Manuelle AG-Budgeteingabe (Modal).
+  const [showManual, setShowManual] = useState(false)
+  const [manualInputs, setManualInputs] = useState<Record<number, string>>({})
+  const [manualSaving, setManualSaving] = useState(false)
+  const [manualError, setManualError] = useState<string | null>(null)
+
+  // 10.1: HOAI-Szenario-Auswahl (Modal) -> Quelle 'hoai' + AG-Budgets vorbelegen.
+  const [showHoaiPicker, setShowHoaiPicker] = useState(false)
+  const [hoaiScenarios, setHoaiScenarios] = useState<HoaiScenario[]>([])
+  const [hoaiPickerLoading, setHoaiPickerLoading] = useState(false)
+  const [hoaiDeriving, setHoaiDeriving] = useState(false)
+
+  // HOAI-Dummy-Rechner (A2) — Szenario-Fenster zum Anlegen/Bearbeiten.
   const [showHoai, setShowHoai] = useState(false)
 
   // Rollenverteilung je LPH (6B-2B) — reines Soll-/Planungsmodell.
@@ -240,6 +265,21 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       if (etRes.success) setExternalTrades(etRes.data)
       else { setExternalTrades([]); console.error('loadExternalTrades:', etRes.message) }
     } catch (e) { setExternalTrades([]); console.error(e) }
+
+    // 10.1: Budgetquelle + AG-Budgets separat laden — ein Fehler hier (z. B.
+    // Patch noch nicht ausgeführt) darf die übrige Projektplanung NICHT blockieren.
+    try {
+      const [srcRes, agRes] = await Promise.all([
+        loadProjectBudgetSource(project.id),
+        loadProjectAgBudgets(project.id),
+      ])
+      if (srcRes.success) { setBudgetSource(srcRes.data.source_type); setHoaiScenarioId(srcRes.data.hoai_scenario_id) }
+      else { setBudgetSource('abacus'); setHoaiScenarioId(null); console.error('loadProjectBudgetSource:', srcRes.message) }
+      const agMap: Record<number, AgBudget> = {}
+      if (agRes.success) for (const r of agRes.data) agMap[r.ag_number] = r
+      else console.error('loadProjectAgBudgets:', agRes.message)
+      setAgBudgets(agMap)
+    } catch (e) { setBudgetSource('abacus'); setHoaiScenarioId(null); setAgBudgets({}); console.error(e) }
   }
 
   async function handleProjectSelect(project: Project) {
@@ -248,6 +288,10 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
     setVisibleLph(new Set()); setSelectedLph(null); setShowLphPicker(false)
     setExternalTrades([]); setShowEtForm(false); setEtError(null)
     setScheduleError(null)
+    // 10.1: Budgetquelle/AG-Budgets zuruecksetzen (werden in loadAll neu geladen).
+    setBudgetSource('abacus'); setHoaiScenarioId(null); setAgBudgets({})
+    setShowManual(false); setShowHoaiPicker(false); setShowHoai(false)
+    setBudgetSourceError(null); setManualError(null)
     await loadAll(project)
   }
 
@@ -678,6 +722,92 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const projectUtilizationPct = projectBudgetTotal > 0 ? Math.min(100, Math.round(projectAllocatedTotal / projectBudgetTotal * 100)) : 0
   const projectProgressColor = projectUtilizationPct > 85 ? 'bg-red-400' : projectUtilizationPct > 60 ? 'bg-amber-400' : 'bg-emerald-400'
 
+  // ── 10.1: Budgetquelle (persistent) + AG-Budgets ────────────────────────────
+  // AG-Summe + Gewerk-Aggregation aus den geladenen AG-Budgets.
+  const agBudgetTotal = AG_NUMBERS.reduce((s, ag) => s + (agBudgets[ag]?.budget_eur ?? 0), 0)
+  const hasAgBudgets = AG_NUMBERS.some((ag) => agBudgets[ag] != null)
+  const hlksBudget = HLKS_AGS.reduce((s, ag) => s + (agBudgets[ag]?.budget_eur ?? 0), 0)
+  const elektroBudget = ELEKTRO_AGS.reduce((s, ag) => s + (agBudgets[ag]?.budget_eur ?? 0), 0)
+  const gewerkBudgetByName: Record<string, number> = { HLKS: hlksBudget, Elektro: elektroBudget }
+  // Live-Summe der manuellen Eingaben (Anzeige im Manual-Modal).
+  const manualSum = AG_NUMBERS.reduce((s, ag) => s + parseEurInput(manualInputs[ag]), 0)
+
+  // Budgetquelle persistieren (Upsert). Setzt den lokalen State aus der Antwort.
+  async function persistBudgetSource(src: BudgetSourceType, scenarioId: string | null) {
+    if (!selectedProject) return
+    setBudgetSourceSaving(true); setBudgetSourceError(null)
+    try {
+      const res = await saveProjectBudgetSource(selectedProject.id, { source_type: src, hoai_scenario_id: scenarioId })
+      if (res.success) { setBudgetSource(res.data.source_type); setHoaiScenarioId(res.data.hoai_scenario_id) }
+      else setBudgetSourceError(res.message)
+    } catch (e) { setBudgetSourceError(e instanceof Error ? e.message : 'Speichern fehlgeschlagen') }
+    finally { setBudgetSourceSaving(false) }
+  }
+
+  // Abacus: nur Quelle speichern (Budget kommt über den Import in die LPH-Budgets).
+  function handleSelectAbacus() { void persistBudgetSource('abacus', null) }
+
+  // HOAI: Quelle 'hoai' speichern und Szenario-Picker öffnen.
+  async function handleSelectHoai() {
+    if (!selectedProject) return
+    await persistBudgetSource('hoai', hoaiScenarioId)
+    setShowHoaiPicker(true); setHoaiPickerLoading(true)
+    try {
+      const res = await loadHoaiScenarios(selectedProject.id)
+      setHoaiScenarios(res.success ? res.data : [])
+      if (!res.success) setBudgetSourceError(res.message)
+    } catch (e) { setHoaiScenarios([]); setBudgetSourceError(e instanceof Error ? e.message : 'Szenarien laden fehlgeschlagen') }
+    finally { setHoaiPickerLoading(false) }
+  }
+
+  // Manuell: Quelle 'manual' speichern und AG-Eingabe-Modal mit aktuellen Werten öffnen.
+  async function handleSelectManual() {
+    if (!selectedProject) return
+    await persistBudgetSource('manual', null)
+    const init: Record<number, string> = {}
+    for (const ag of AG_NUMBERS) {
+      const v = agBudgets[ag]?.budget_eur
+      init[ag] = v != null && v > 0 ? String(v) : ''
+    }
+    setManualInputs(init); setManualError(null); setShowManual(true)
+  }
+
+  // Gewähltes HOAI-Szenario -> Quelle + Szenario speichern, AG-Budgets vorbelegen.
+  async function handleChooseScenario(scenarioId: string) {
+    if (!selectedProject) return
+    await persistBudgetSource('hoai', scenarioId)
+    setHoaiDeriving(true); setBudgetSourceError(null)
+    try {
+      const res = await deriveAgBudgetsFromHoaiScenario(selectedProject.id, scenarioId)
+      if (res.success) {
+        const m: Record<number, AgBudget> = {}
+        for (const r of res.data) m[r.ag_number] = r
+        setAgBudgets(m); setShowHoaiPicker(false)
+      } else setBudgetSourceError(res.message)
+    } catch (e) { setBudgetSourceError(e instanceof Error ? e.message : 'Ableitung fehlgeschlagen') }
+    finally { setHoaiDeriving(false) }
+  }
+
+  // Manuelle AG-Budgets speichern (alle AG 1–5, source 'manual').
+  async function handleSaveManual() {
+    if (!selectedProject) return
+    setManualSaving(true); setManualError(null)
+    try {
+      const rows = AG_NUMBERS.map((ag) => ({
+        ag_number: ag,
+        budget_eur: parseEurInput(manualInputs[ag]),
+        source_type: 'manual' as const,
+      }))
+      const res = await saveProjectAgBudgets(selectedProject.id, rows)
+      if (res.success) {
+        const m: Record<number, AgBudget> = {}
+        for (const r of res.data) m[r.ag_number] = r
+        setAgBudgets(m); setShowManual(false)
+      } else setManualError(res.message)
+    } catch (e) { setManualError(e instanceof Error ? e.message : 'Speichern fehlgeschlagen') }
+    finally { setManualSaving(false) }
+  }
+
   // 9-KorrA: Hover-Tooltip eines LPH-Balkens. SOLL kommt wieder aus der zentralen
   // Abacus-/Projektbudgetlogik (Budgetbasis pro LPH wurde entfernt). Ohne wirksames
   // Sollbudget steht "kein Sollbudget" statt 0h.
@@ -1033,43 +1163,134 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
             {/* 9-KorrA: Budgetquelle auf Projektebene (ersetzt Kalkulationsprofil). */}
             <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Budgetquelle</span>
             <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white p-0.5">
-              <button onClick={() => setBudgetSource('abacus')}
+              <button onClick={handleSelectAbacus} disabled={budgetSourceSaving}
                 title="Abacus-Budget aus dem Import verwenden"
-                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${budgetSource === 'abacus' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${budgetSource === 'abacus' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
                 Abacus
               </button>
-              <button onClick={() => { setBudgetSource('hoai'); setShowHoai(true) }}
-                title="HOAI-Rechner (Dummy/Schätzung) öffnen"
-                className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${budgetSource === 'hoai' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+              <button onClick={handleSelectHoai} disabled={budgetSourceSaving}
+                title="HOAI-Szenario als Budgetquelle wählen"
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${budgetSource === 'hoai' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
                 <Calculator className="h-3.5 w-3.5" />HOAI-Rechner
               </button>
-              <button onClick={() => { setBudgetSource('manual'); setShowManualPlaceholder(true) }}
-                title="Freie / manuelle Budgeteingabe"
-                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${budgetSource === 'manual' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+              <button onClick={handleSelectManual} disabled={budgetSourceSaving}
+                title="Freie / manuelle AG-Budgeteingabe"
+                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${budgetSource === 'manual' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
                 Frei / manuell
               </button>
             </div>
+            {budgetSourceError && <span className="text-[10px] text-red-500 max-w-[220px] truncate" title={budgetSourceError}>{budgetSourceError}</span>}
           </div>
         )}
       </div>
 
-      {/* HOAI-Dummy-Rechner (A2): isoliertes, rein lokales Szenario-Fenster. */}
+      {/* HOAI-Dummy-Rechner (A2): isoliertes Szenario-Fenster (Anlegen/Bearbeiten). */}
       {showHoai && selectedProject && (
         <HoaiCalculatorModal projectId={selectedProject.id} projectName={selectedProject.name} onClose={() => setShowHoai(false)} />
       )}
 
-      {/* 9-KorrA: Platzhalter für freie/manuelle Budgeteingabe (folgt im nächsten Paket). */}
-      {showManualPlaceholder && (
+      {/* 10.1: HOAI-Szenario als Budgetquelle wählen -> AG-Budgets vorbelegen. */}
+      {showHoaiPicker && selectedProject && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-slate-900/30" onClick={() => setShowManualPlaceholder(false)} />
-          <div className="relative z-10 w-full max-w-sm bg-white rounded-xl border border-slate-200 shadow-xl p-5">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-sm font-semibold text-slate-700">Frei / manuell</p>
-              <button onClick={() => setShowManualPlaceholder(false)} className="text-slate-300 hover:text-slate-600 transition-colors" title="Schließen">
+          <div className="absolute inset-0 bg-slate-900/30" onClick={() => setShowHoaiPicker(false)} />
+          <div className="relative z-10 w-full max-w-md bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100 shrink-0">
+              <div className="flex items-center gap-2">
+                <Calculator className="h-4 w-4 text-slate-400" />
+                <p className="text-sm font-semibold text-slate-700">HOAI-Szenario als Budgetquelle</p>
+              </div>
+              <button onClick={() => setShowHoaiPicker(false)} className="text-slate-300 hover:text-slate-600 transition-colors" title="Schließen">
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <p className="text-xs text-slate-500">Manuelle Budgeteingabe folgt im nächsten Paket.</p>
+            <div className="p-5 space-y-3 overflow-y-auto">
+              <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
+                <p className="text-[11px] text-amber-700">
+                  Quelle <strong>HOAI</strong> ist gespeichert. Ein gewähltes Dummy-Szenario belegt die
+                  AG-Budgets (AG 1–5) <strong>transparent</strong> über eine vereinfachte Verteilung vor
+                  (Summe {HOAI_DUMMY_AG_SPLIT_SUM}%). <strong>Keine</strong> rechtsverbindliche HOAI-Berechnung;
+                  Abacus-Budgets bleiben unberührt.
+                </p>
+              </div>
+              {hoaiPickerLoading ? (
+                <p className="text-[11px] text-slate-400 px-1 py-2">Laden…</p>
+              ) : hoaiScenarios.length === 0 ? (
+                <p className="text-xs text-slate-500">Noch keine HOAI-Szenarien gespeichert. Bitte zuerst im HOAI-Rechner anlegen.</p>
+              ) : (
+                <div className="rounded-lg border border-slate-200 divide-y divide-slate-100">
+                  {hoaiScenarios.map((s) => {
+                    const total = calcHoaiDummy(s.anrechenbare_kosten, s.honorar_pct).totalHonorar
+                    const active = hoaiScenarioId === s.id
+                    return (
+                      <button key={s.id} onClick={() => handleChooseScenario(s.id)} disabled={hoaiDeriving}
+                        className={`w-full text-left px-3 py-2 hover:bg-slate-50/60 transition-colors disabled:opacity-50 ${active ? 'bg-slate-50' : ''}`}>
+                        <p className="text-xs font-medium text-slate-700 truncate">
+                          {s.label}{active && <span className="ml-1.5 text-[10px] text-emerald-600 font-semibold">· aktiv</span>}
+                        </p>
+                        <p className="text-[10px] text-slate-400 truncate">
+                          {fmtEur(s.anrechenbare_kosten)} · {s.honorar_pct}% → {fmtEur(total)} Gesamthonorar
+                        </p>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+              {hoaiDeriving && <p className="text-[11px] text-slate-400">AG-Budgets werden vorbelegt…</p>}
+              <button onClick={() => { setShowHoaiPicker(false); setShowHoai(true) }}
+                className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg border border-slate-200 bg-white text-slate-700 text-xs font-medium hover:bg-slate-50 transition-colors">
+                <Calculator className="h-3.5 w-3.5" />Szenario im HOAI-Rechner anlegen / bearbeiten
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 10.1: Manuelle AG-Budgeteingabe (AG 1–5). */}
+      {showManual && selectedProject && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-900/30" onClick={() => setShowManual(false)} />
+          <div className="relative z-10 w-full max-w-md bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100 shrink-0">
+              <div>
+                <p className="text-sm font-semibold text-slate-700">Frei / manuell — AG-Budgets</p>
+                <p className="text-[11px] text-slate-400">Budget je Anlagengruppe (AG 1–5)</p>
+              </div>
+              <button onClick={() => setShowManual(false)} className="text-slate-300 hover:text-slate-600 transition-colors" title="Schließen">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="p-5 space-y-3 overflow-y-auto">
+              {manualError && (
+                <p className="text-[11px] text-red-500 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{manualError}</p>
+              )}
+              <div className="space-y-2">
+                {ANLAGENGRUPPEN.map((g) => (
+                  <div key={g.ag} className="flex items-center gap-2">
+                    <label htmlFor={`manual-ag-${g.ag}`} className="flex-1 text-xs text-slate-600 truncate" title={g.label}>{g.label}</label>
+                    <div className="relative w-32 shrink-0">
+                      <input id={`manual-ag-${g.ag}`} type="text" inputMode="decimal"
+                        value={manualInputs[g.ag] ?? ''}
+                        onChange={(e) => setManualInputs((prev) => ({ ...prev, [g.ag]: e.target.value }))}
+                        placeholder="0"
+                        className="w-full text-sm text-right border border-slate-200 rounded-lg pl-3 pr-6 py-1.5 outline-none focus:border-slate-400 text-slate-800" />
+                      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-slate-400">€</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-4 py-2.5">
+                <span className="text-xs font-semibold text-slate-500">Summe AG 1–5</span>
+                <span className="text-base font-semibold text-slate-800 tabular-nums">{fmtEur(manualSum)}</span>
+              </div>
+              <p className="text-[10px] text-slate-400">
+                Manuelle AG-Budgets überschreiben <strong>keine</strong> Abacus-/LPH-Budgets. Die Verteilung auf
+                LPH/Sollstunden folgt in einem separaten Paket.
+              </p>
+              <button onClick={handleSaveManual} disabled={manualSaving}
+                className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 transition-colors disabled:opacity-50">
+                {manualSaving ? 'Speichern…' : 'AG-Budgets speichern'}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1087,33 +1308,52 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
             </>
           ) : <p className="text-slate-300 text-sm mt-1">{selectedProject != null ? 'Kein Budget' : 'Projekt wählen'}</p>}
         </div>
-        {/* 9-KorrA: Mittlere Karte fachlich vorbereitet — Budget je Anlagengruppe
-            (AG 1–5). Noch KEINE AG-Budgetdaten -> Beträge als „—". */}
+        {/* 10.1: Mittlere Karte — echte AG-Budgets (AG 1–5) aus project_ag_budgets.
+            Ohne gespeicherte Zeile -> „—" (kein Ableiten). */}
         <div className="bg-white rounded-xl border border-slate-200 p-4">
           <div className="flex items-center gap-2 mb-2"><Euro className="h-3.5 w-3.5 text-slate-300" /><p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Budget nach Anlagengruppen</p></div>
           <div className="space-y-1">
-            {ANLAGENGRUPPEN.map(g => (
-              <div key={g.ag} className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-slate-500 truncate" title={g.label}>{g.label}</span>
-                <span className="text-[11px] font-medium text-slate-300 tabular-nums shrink-0">—</span>
-              </div>
-            ))}
+            {ANLAGENGRUPPEN.map(g => {
+              const row = agBudgets[g.ag]
+              return (
+                <div key={g.ag} className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-slate-500 truncate" title={g.label}>{g.label}</span>
+                  <span className={`text-[11px] font-medium tabular-nums shrink-0 ${row ? 'text-slate-700' : 'text-slate-300'}`}>
+                    {row ? fmtEur(row.budget_eur) : '—'}
+                  </span>
+                </div>
+              )
+            })}
           </div>
-          <p className="text-[10px] text-slate-400 mt-1.5">Noch keine AG-Budgetdaten hinterlegt.</p>
+          {hasAgBudgets ? (
+            <div className="flex items-center justify-between gap-2 mt-1.5 pt-1.5 border-t border-slate-100">
+              <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Summe AG 1–5</span>
+              <span className="text-xs font-semibold text-slate-700 tabular-nums">{fmtEur(agBudgetTotal)}</span>
+            </div>
+          ) : (
+            <p className="text-[10px] text-slate-400 mt-1.5">Noch keine AG-Budgetdaten hinterlegt.</p>
+          )}
         </div>
-        {/* 9-KorrA: Rechte Karte fachlich vorbereitet — Sollstunden je Gewerk
-            (HLKS = AG 1–3, Elektro = AG 4–5). Noch KEINE Berechnung -> „— h". */}
+        {/* 10.1: Rechte Karte — Gewerkbudgets aus AG-Budgets (HLKS = AG 1–3,
+            Elektro = AG 4–5). Budget echt; Sollstunden bewusst „— h"
+            (AG→LPH→Rollen-Verteilung folgt in einem Folgepaket). */}
         <div className="bg-white rounded-xl border border-slate-200 p-4">
-          <div className="flex items-center gap-2 mb-2"><Clock className="h-3.5 w-3.5 text-slate-300" /><p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Sollstunden nach Gewerk</p></div>
-          <div className="space-y-1.5">
-            {GEWERK_GRUPPEN.map(g => (
-              <div key={g.name} className="flex items-center justify-between gap-2">
-                <span className="text-sm text-slate-600">{g.name} <span className="text-[10px] text-slate-400">· {g.span}</span></span>
-                <span className="text-base font-semibold text-slate-300 tabular-nums">— h</span>
-              </div>
-            ))}
+          <div className="flex items-center gap-2 mb-2"><Clock className="h-3.5 w-3.5 text-slate-300" /><p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Budget &amp; Sollstunden nach Gewerk</p></div>
+          <div className="space-y-2">
+            {GEWERK_GROUPS.map(g => {
+              const budget = gewerkBudgetByName[g.name] ?? 0
+              return (
+                <div key={g.name} className="flex items-center justify-between gap-2">
+                  <span className="text-sm text-slate-600">{g.name} <span className="text-[10px] text-slate-400">· {g.span}</span></span>
+                  <span className="text-right">
+                    <span className={`block text-sm font-semibold tabular-nums ${hasAgBudgets ? 'text-slate-700' : 'text-slate-300'}`}>{hasAgBudgets ? fmtEur(budget) : '—'}</span>
+                    <span className="block text-[10px] text-slate-300 tabular-nums">— h</span>
+                  </span>
+                </div>
+              )
+            })}
           </div>
-          <p className="text-[10px] text-slate-400 mt-1.5">Gewerk-Sollstunden folgen in einem separaten Paket.</p>
+          <p className="text-[10px] text-slate-400 mt-1.5">Sollstunden je Gewerk folgen (AG→LPH-Verteilung in einem separaten Paket).</p>
         </div>
       </div>
 
