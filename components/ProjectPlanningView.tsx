@@ -648,6 +648,20 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
   const utilizationPct = totalBudget > 0 ? Math.min(100, Math.round(totalAllocated / totalBudget * 100)) : 0
   const progressColor = utilizationPct > 85 ? 'bg-red-400' : utilizationPct > 60 ? 'bg-amber-400' : 'bg-emerald-400'
 
+  // ── Projektgesamtbudget (8A) ────────────────────────────────────────────────
+  // Die obere Budgetkarte ist PROJEKTBEZOGEN, nicht LPH-bezogen:
+  //   budget    = Σ project_lph_budgets.budget_eur  (alle geladenen LPH des Projekts)
+  //   verbraucht = Σ allocated_eur                  (je LPH aus getLphBudgetStatus-RPC)
+  // Beide Summen stammen aus bereits geladenen LPH-Budgetstatuswerten (lphBudgets).
+  // Die Carrier-Strategie beim Matrix-Speichern hält die Stunden je (MA,KW) auf genau
+  // EINER LPH-Zeile (alle anderen 0) → die LPH-allocated_eur summieren sich ohne
+  // Doppelzählung zum projektweiten Verbrauch. Kein HLKS/ELT-Datenmodell hier (folgt 8B).
+  const projectBudgetTotal = Object.values(lphBudgets).reduce((s, b) => s + (b.budget_eur ?? 0), 0)
+  const projectAllocatedTotal = Object.values(lphBudgets).reduce((s, b) => s + (b.allocated_eur ?? 0), 0)
+  const projectRemaining = projectBudgetTotal - projectAllocatedTotal
+  const projectUtilizationPct = projectBudgetTotal > 0 ? Math.min(100, Math.round(projectAllocatedTotal / projectBudgetTotal * 100)) : 0
+  const projectProgressColor = projectUtilizationPct > 85 ? 'bg-red-400' : projectUtilizationPct > 60 ? 'bg-amber-400' : 'bg-emerald-400'
+
   // ── Soll-Rollenbedarf (6B-2C, read-only) ────────────────────────────────────
   // Reine Planungswerte, abgeleitet aus LPH-Budget (project_lph_budgets.budget_eur)
   // + Rollenverteilung + interner Planungssatz (planning_roles.rate_eur_per_hour).
@@ -976,15 +990,15 @@ export default function ProjectPlanningView({ projects, employees, initialProjec
       {/* ── Budget-Karten (aktive LPH) ── */}
       <div className="grid grid-cols-3 gap-4">
         <div className="bg-white rounded-xl border border-slate-200 p-4">
-          <div className="flex items-center gap-2 mb-2"><Euro className="h-3.5 w-3.5 text-slate-300" /><p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Budget verbleibend</p></div>
-          {totalBudget > 0 ? (
+          <div className="flex items-center gap-2 mb-2"><Euro className="h-3.5 w-3.5 text-slate-300" /><p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Projektbudget verbleibend</p></div>
+          {projectBudgetTotal > 0 ? (
             <>
-              <p className="text-xl font-semibold text-slate-800">{fmtEur(totalBudget-totalAllocated)}</p>
-              <p className="text-xs text-slate-400 mt-0.5">{fmtEur(totalAllocated)} von {fmtEur(totalBudget)}</p>
-              <div className="mt-2.5 h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className={`h-full rounded-full ${progressColor}`} style={{ width: `${utilizationPct}%` }} /></div>
-              <p className="text-[10px] text-slate-400 mt-1">{utilizationPct}% ausgeschöpft</p>
+              <p className="text-xl font-semibold text-slate-800">{fmtEur(projectRemaining)}</p>
+              <p className="text-xs text-slate-400 mt-0.5">{fmtEur(projectAllocatedTotal)} von {fmtEur(projectBudgetTotal)}</p>
+              <div className="mt-2.5 h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className={`h-full rounded-full ${projectProgressColor}`} style={{ width: `${projectUtilizationPct}%` }} /></div>
+              <p className="text-[10px] text-slate-400 mt-1">{projectUtilizationPct}% ausgeschöpft · Verbrauch aus vorhandenen LPH-Budgetstatuswerten</p>
             </>
-          ) : <p className="text-slate-300 text-sm mt-1">{activeLph != null ? 'Kein Budget' : 'LPH wählen'}</p>}
+          ) : <p className="text-slate-300 text-sm mt-1">{selectedProject != null ? 'Kein Budget' : 'Projekt wählen'}</p>}
         </div>
         <div className="bg-white rounded-xl border border-slate-200 p-4">
           <div className="flex items-center gap-2 mb-2"><Clock className="h-3.5 w-3.5 text-slate-300" /><p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Verplante Stunden</p></div>
